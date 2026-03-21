@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+insightface
+qdrant-client
+torch
+opencv-python
+httpx
+pydantic
+numpy

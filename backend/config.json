@@ -1,0 +1,25 @@
+{
+  "api": {
+    "base_url": "https://api.analytics.thefusionapps.com/api/v4/retail/visit-stats",
+    "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjUyLCJicmFuY2hJZCI6IlRNSi1DQkUifSwiaWF0IjoxNzczOTg4MzY0LCJleHAiOjE3NzQwNzQ3NjR9.MbT0RwfPWZB6zPDoZLOK81s9j3ileyg7UYhUHN5FfRc",
+    "limit": 50,
+    "category": "potential",
+    "timeRange": "0,300,18000",
+    "startDate": "2026-03-20",
+    "endDate": ""
+  },
+  "model": {
+    "name": "buffalo_l",
+    "threshold": 0.75,
+    "quality_filter": {
+      "min_blur": 30.0,
+      "min_confidence": 0.85,
+      "min_face_size": 64
+    }
+  },
+  "qdrant": {
+    "collection": "face_embeddings",
+    "vector_size": 512,
+    "path": "./qdrant_db"
+  }
+}

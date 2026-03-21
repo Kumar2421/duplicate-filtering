@@ -1,0 +1,496 @@
+{
+    "total": 642,
+    "visits": [
+        {
+            "id": 666663,
+            "branchId": "TMJ-CBE",
+            "camera": "Basement-Stairs",
+            "customerId": "visitor-276793",
+            "image": "https://cdn.thefusionapps.com/v2/26b948e4-2c21-4c58-a2fb-82c10728b49a-3192026-22713AM.jpg",
+            "entryTime": "2026-03-18T20:56:11.088Z",
+            "exitTime": "2026-03-19T10:47:01.395Z",
+            "isFirstVisit": false,
+            "isDeleted": false,
+            "entryEventIds": [
+                {
+                    "box": {
+                        "top": 99,
+                        "left": 67,
+                        "width": 85,
+                        "height": 113
+                    },
+                    "type": "auto",
+                    "event": "clockIn",
+                    "zones": [
+                        {
+                            "id": "Basement",
+                            "name": "Basement",
+                            "timestamp": "2026-03-18T20:56:11.088Z"
+                        }
+                    ],
+                    "camera": "Basement-Stairs",
+                    "v5Data": {
+                        "notAvailable2": true
+                    },
+                    "boxData": {},
+                    "eventId": "26b948e4-2c21-4c58-a2fb-82c10728b49a-3192026-22713AM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-18T14:34:36+05:30",
+                    "fileName": "26b948e4-2c21-4c58-a2fb-82c10728b49a-3192026-22713AM.jpg",
+                    "createdAt": "2026-03-19T12:08:28.904Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-18T20:56:11.088Z",
+                    "updatedAt": "2026-03-19T12:08:28.904Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                },
+                {
+                    "box": {
+                        "top": 98,
+                        "left": 65,
+                        "width": 79,
+                        "height": 113
+                    },
+                    "type": "auto",
+                    "event": "clockIn",
+                    "zones": [
+                        {
+                            "id": null,
+                            "name": null,
+                            "timestamp": "2026-03-19T10:46:38.772Z"
+                        }
+                    ],
+                    "camera": "TMJ-CBE-Exit",
+                    "v5Data": {
+                        "notAvailable": true
+                    },
+                    "boxData": {},
+                    "eventId": "f69e32ff-985e-497d-bf05-e89bb1ea86f9-3192026-51823PM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-19T17:36:16+05:30",
+                    "fileName": "f69e32ff-985e-497d-bf05-e89bb1ea86f9-3192026-51823PM.jpg",
+                    "createdAt": "2026-03-19T12:08:36.900Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T10:46:38.772Z",
+                    "updatedAt": "2026-03-19T12:08:36.900Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                },
+                {
+                    "box": {
+                        "top": 74,
+                        "left": 155,
+                        "width": 86,
+                        "height": 117
+                    },
+                    "type": "auto",
+                    "event": "clockIn",
+                    "zones": [
+                        {
+                            "id": null,
+                            "name": null,
+                            "timestamp": "2026-03-19T10:46:46.898Z"
+                        }
+                    ],
+                    "camera": "TMJ-CBE-Exit",
+                    "v5Data": {
+                        "notAvailable": true
+                    },
+                    "boxData": {},
+                    "eventId": "4a91e137-b43b-4ded-b8a7-c0031a4624af-3192026-51931PM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-19T17:36:16+05:30",
+                    "fileName": "4a91e137-b43b-4ded-b8a7-c0031a4624af-3192026-51931PM.jpg",
+                    "createdAt": "2026-03-19T12:09:30.436Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T10:46:46.898Z",
+                    "updatedAt": "2026-03-19T12:09:30.436Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                },
+                {
+                    "box": {
+                        "top": 89,
+                        "left": 68,
+                        "width": 84,
+                        "height": 112
+                    },
+                    "type": "auto",
+                    "event": "clockIn",
+                    "zones": [
+                        {
+                            "id": null,
+                            "name": null,
+                            "timestamp": "2026-03-19T10:47:01.008Z"
+                        }
+                    ],
+                    "camera": "TMJ-CBE-Exit",
+                    "v5Data": {
+                        "notAvailable": true
+                    },
+                    "boxData": {},
+                    "eventId": "399e6cfb-d5c7-43fc-ba42-668543e31947-3192026-51818PM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-19T17:36:16+05:30",
+                    "fileName": "399e6cfb-d5c7-43fc-ba42-668543e31947-3192026-51818PM.jpg",
+                    "createdAt": "2026-03-19T12:08:28.904Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T10:47:01.008Z",
+                    "updatedAt": "2026-03-19T12:08:28.904Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                }
+            ],
+            "exitEventIds": [
+                {
+                    "box": {
+                        "top": 97,
+                        "left": 66,
+                        "width": 78,
+                        "height": 114
+                    },
+                    "type": "auto",
+                    "event": "clockOut",
+                    "zones": [
+                        {
+                            "id": null,
+                            "name": null,
+                            "timestamp": "2026-03-19T10:46:37.004Z"
+                        }
+                    ],
+                    "camera": "TMJ-CBE-Exit",
+                    "v5Data": {
+                        "notAvailable": true
+                    },
+                    "boxData": {},
+                    "eventId": "214cd7a3-caf6-4771-b3d1-2142b10c2f8e-3192026-51856PM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-19T17:36:16+05:30",
+                    "fileName": "214cd7a3-caf6-4771-b3d1-2142b10c2f8e-3192026-51856PM.jpg",
+                    "createdAt": "2026-03-19T12:09:05.884Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T10:46:37.004Z",
+                    "updatedAt": "2026-03-19T12:09:05.884Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                },
+                {
+                    "box": {
+                        "top": 84,
+                        "left": 56,
+                        "width": 64,
+                        "height": 89
+                    },
+                    "type": "auto",
+                    "event": "clockOut",
+                    "zones": [
+                        {
+                            "id": null,
+                            "name": null,
+                            "timestamp": "2026-03-19T10:46:46.898Z"
+                        }
+                    ],
+                    "camera": "TMJ-CBE-Exit",
+                    "v5Data": {
+                        "notAvailable": true
+                    },
+                    "boxData": {},
+                    "eventId": "183b0cb0-2b88-4b6e-866b-8dcd53cd52fe-3192026-51931PM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-19T17:36:16+05:30",
+                    "fileName": "183b0cb0-2b88-4b6e-866b-8dcd53cd52fe-3192026-51931PM.jpg",
+                    "createdAt": "2026-03-19T12:09:34.886Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T10:46:46.898Z",
+                    "updatedAt": "2026-03-19T12:09:34.886Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                },
+                {
+                    "box": {
+                        "top": 95,
+                        "left": 57,
+                        "width": 82,
+                        "height": 113
+                    },
+                    "type": "auto",
+                    "event": "clockOut",
+                    "zones": [
+                        {
+                            "id": null,
+                            "name": null,
+                            "timestamp": "2026-03-19T10:46:46.898Z"
+                        }
+                    ],
+                    "camera": "TMJ-CBE-Exit",
+                    "v5Data": {
+                        "notAvailable": true
+                    },
+                    "boxData": {},
+                    "eventId": "df9e1eaa-b610-4265-865f-90de363b9316-3192026-51930PM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-19T17:36:16+05:30",
+                    "fileName": "df9e1eaa-b610-4265-865f-90de363b9316-3192026-51930PM.jpg",
+                    "createdAt": "2026-03-19T12:09:27.869Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T10:46:46.898Z",
+                    "updatedAt": "2026-03-19T12:09:27.869Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                },
+                {
+                    "box": {
+                        "top": 100,
+                        "left": 74,
+                        "width": 81,
+                        "height": 113
+                    },
+                    "type": "auto",
+                    "event": "clockOut",
+                    "zones": [
+                        {
+                            "id": null,
+                            "name": null,
+                            "timestamp": "2026-03-19T10:47:01.395Z"
+                        }
+                    ],
+                    "camera": "TMJ-CBE-Exit",
+                    "v5Data": {
+                        "notAvailable": true
+                    },
+                    "boxData": {},
+                    "eventId": "fcaa333e-3db1-4e40-9217-91ce63bb2476-3192026-51823PM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-19T17:36:16+05:30",
+                    "fileName": "fcaa333e-3db1-4e40-9217-91ce63bb2476-3192026-51823PM.jpg",
+                    "createdAt": "2026-03-19T12:08:33.494Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T10:47:01.395Z",
+                    "updatedAt": "2026-03-19T12:08:33.494Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                }
+            ],
+            "isConverted": false,
+            "convertedData": {
+                "id": "",
+                "value": 0
+            },
+            "intrestedTags": [],
+            "results": {
+                "box": {
+                    "top": 99,
+                    "left": 67,
+                    "width": 85,
+                    "height": 113
+                },
+                "yaw": -1,
+                "blur": 47.98,
+                "roll": 0,
+                "pitch": 6,
+                "face_id": "122287",
+                "confidence": 0.99902,
+                "faceCompareConfidence": 82.44
+            },
+            "isBlackListed": false,
+            "isVip": false,
+            "zones": [
+                {
+                    "id": "Basement",
+                    "name": "Basement",
+                    "timestamp": "2026-03-18T20:56:11.088Z"
+                },
+                {
+                    "id": null,
+                    "name": null,
+                    "timestamp": "2026-03-19T10:46:37.004Z"
+                },
+                {
+                    "id": null,
+                    "name": null,
+                    "timestamp": "2026-03-19T10:46:38.772Z"
+                },
+                {
+                    "id": null,
+                    "name": null,
+                    "timestamp": "2026-03-19T10:46:46.898Z"
+                },
+                {
+                    "id": null,
+                    "name": null,
+                    "timestamp": "2026-03-19T10:46:46.898Z"
+                },
+                {
+                    "id": null,
+                    "name": null,
+                    "timestamp": "2026-03-19T10:46:46.898Z"
+                },
+                {
+                    "id": null,
+                    "name": null,
+                    "timestamp": "2026-03-19T10:47:01.008Z"
+                },
+                {
+                    "id": null,
+                    "name": null,
+                    "timestamp": "2026-03-19T10:47:01.395Z"
+                }
+            ],
+            "dwellMinutes": 0,
+            "date": "2026-03-19",
+            "refImage": "https://cdn.thefusionapps.com/v4/TMJ-CBE/visitor-276793.jpg",
+            "customer": {
+                "age": 40,
+                "gender": "MALE",
+                "displayName": null,
+                "createdAt": "2026-03-18T12:53:29.969Z",
+                "isDeleted": false,
+                "customerId": "visitor-276793",
+                "updatedAt": "2026-03-19T12:09:34.888Z"
+            },
+            "duration": 49850,
+            "groupId": 1,
+            "groupColor": "rgb(236, 250, 240)",
+            "isGroupVisit": false,
+            "isEmployee": true,
+            "branchName": "Thangamayil Coimbatore",
+            "displayId": "Visit-2026'03'19-001",
+            "tagsValue": [],
+            "tags": []
+        },
+        {
+            "id": 666664,
+            "branchId": "TMJ-CBE",
+            "camera": "Basement-Stairs",
+            "customerId": "visitor-277061",
+            "image": "https://cdn.thefusionapps.com/v2/a7174e39-8830-4429-a7b6-3d904c2f32e4-3192026-62025AM.jpg",
+            "entryTime": "2026-03-19T00:50:18.418Z",
+            "exitTime": "2026-03-19T06:01:48.148Z",
+            "isFirstVisit": true,
+            "isDeleted": false,
+            "entryEventIds": [
+                {
+                    "box": {
+                        "top": 124,
+                        "left": 89,
+                        "width": 99,
+                        "height": 119
+                    },
+                    "type": "auto",
+                    "event": "clockIn",
+                    "zones": [
+                        {
+                            "id": "Basement",
+                            "name": "Basement",
+                            "timestamp": "2026-03-19T00:50:18.418Z"
+                        }
+                    ],
+                    "camera": "Basement-Stairs",
+                    "v5Data": {
+                        "noted2": "v5FaceData function is skipped"
+                    },
+                    "boxData": {},
+                    "eventId": "a7174e39-8830-4429-a7b6-3d904c2f32e4-3192026-62025AM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-18T14:34:36+05:30",
+                    "fileName": "a7174e39-8830-4429-a7b6-3d904c2f32e4-3192026-62025AM.jpg",
+                    "createdAt": "2026-03-19T06:01:58.630Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T00:50:18.418Z",
+                    "updatedAt": "2026-03-19T06:01:58.630Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                }
+            ],
+            "exitEventIds": [
+                {
+                    "box": {
+                        "top": 252,
+                        "left": 170,
+                        "width": 195,
+                        "height": 234
+                    },
+                    "type": "auto",
+                    "event": "clockOut",
+                    "zones": [
+                        {
+                            "id": "Basement",
+                            "name": "Basement",
+                            "timestamp": "2026-03-19T06:01:48.148Z"
+                        }
+                    ],
+                    "camera": "Basement-Stairs",
+                    "v5Data": {
+                        "notAvailable": true
+                    },
+                    "boxData": {},
+                    "eventId": "94ba749c-94de-4ed2-b00c-39021b7831e1-3192026-113155AM",
+                    "version": "v2",
+                    "auditLog": "by Customer Events V35 Flow on 2026-03-18T14:34:36+05:30",
+                    "fileName": "94ba749c-94de-4ed2-b00c-39021b7831e1-3192026-113155AM.jpg",
+                    "createdAt": "2026-03-19T06:01:58.630Z",
+                    "isDeleted": false,
+                    "timestamp": "2026-03-19T06:01:48.148Z",
+                    "updatedAt": "2026-03-19T06:01:58.630Z",
+                    "legacyData": {},
+                    "storedVersion": "v2"
+                }
+            ],
+            "isConverted": false,
+            "convertedData": {
+                "id": "",
+                "value": 0
+            },
+            "intrestedTags": [],
+            "results": {
+                "box": {
+                    "top": 124,
+                    "left": 89,
+                    "width": 99,
+                    "height": 119
+                },
+                "yaw": -2,
+                "blur": 41.79,
+                "roll": 0,
+                "pitch": 16,
+                "face_id": "39566",
+                "confidence": 0.99889,
+                "faceCompareConfidence": 62.76
+            },
+            "isBlackListed": false,
+            "isVip": false,
+            "zones": [
+                {
+                    "id": "Basement",
+                    "name": "Basement",
+                    "timestamp": "2026-03-19T00:50:18.418Z"
+                },
+                {
+                    "id": "Basement",
+                    "name": "Basement",
+                    "timestamp": "2026-03-19T06:01:48.148Z"
+                }
+            ],
+            "dwellMinutes": -311,
+            "date": "2026-03-19",
+            "refImage": "https://cdn.thefusionapps.com/v4/TMJ-CBE/visitor-277061.jpg",
+            "customer": {
+                "age": 51,
+                "gender": "MALE",
+                "displayName": null,
+                "createdAt": "2026-03-19T00:50:30.902Z",
+                "isDeleted": false,
+                "customerId": "visitor-277061",
+                "updatedAt": "2026-03-19T06:01:58.632Z"
+            },
+            "duration": 18689,
+            "groupId": 2,
+            "groupColor": "rgb(228, 252, 246)",
+            "isGroupVisit": false,
+            "isEmployee": true,
+            "branchName": "Thangamayil Coimbatore",
+            "displayId": "Visit-2026'03'19-002",
+            "tagsValue": [],
+            "tags": []
+        },
+        
