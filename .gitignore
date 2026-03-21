@@ -12,3 +12,5 @@ qdrant_db/
 Thumbs.db
 .idea/
 .vscode/
+
+data/
