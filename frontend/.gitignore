@@ -25,3 +25,7 @@ dist-ssr
 
 # Local data
 data/
+
+# Python virtual environment
+.venv/
+.venv

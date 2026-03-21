@@ -1,9 +1,11 @@
+import json
 import httpx
 import asyncio
 import logging
 import pytz
+import os
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import List, Dict, Any, Optional, AsyncGenerator, Set
 from backend.utils.normalizer import normalize_visit_data, fetch_and_prepare
 
 class APIService:
@@ -21,6 +23,29 @@ class APIService:
         self.category = category
         self.time_range = time_range
         self.logger = logging.getLogger(__name__)
+        self.state_dir = "data/state"
+        os.makedirs(self.state_dir, exist_ok=True)
+
+    def _get_state_file(self, branch_id: str, date_str: str) -> str:
+        return os.path.join(self.state_dir, f"seen_visits_{branch_id}_{date_str}.json")
+
+    def _load_seen_visits(self, branch_id: str, date_str: str) -> Set[str]:
+        state_file = self._get_state_file(branch_id, date_str)
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, 'r') as f:
+                    return set(json.load(f))
+            except Exception as e:
+                self.logger.error(f"Error loading seen visits: {e}")
+        return set()
+
+    def _save_seen_visits(self, branch_id: str, date_str: str, seen_ids: Set[str]):
+        state_file = self._get_state_file(branch_id, date_str)
+        try:
+            with open(state_file, 'w') as f:
+                json.dump(list(seen_ids), f)
+        except Exception as e:
+            self.logger.error(f"Error saving seen visits: {e}")
 
     async def fetch_page(
         self,
@@ -97,7 +122,7 @@ class APIService:
     async def fetch_visits_continuously(self, branch_id: str, interval_minutes: int = 5) -> AsyncGenerator[tuple[str, List[Dict[str, Any]]], None]:
         """
         Continuously fetch visits for the current date (IST/UTC+5:30).
-        Yields (date_str, visits) periodically.
+        Yields only NEW (unseen) visits periodically.
         """
         ist = pytz.timezone('Asia/Kolkata')
         
@@ -107,13 +132,27 @@ class APIService:
                 date_str = now_ist.strftime("%Y-%m-%d")
                 self.logger.info(f"CONTINUOUS_FETCH: Initiating fetch for {date_str} at {now_ist.strftime('%H:%M:%S')} IST")
                 
-                # Use the existing logic to fetch all pages for today
+                # Layer 1: Persistent State Tracking
+                seen_ids = self._load_seen_visits(branch_id, date_str)
+                
+                # Fetch all visits for today
                 day_visits = await self.fetch_visits_for_date(branch_id, date_str)
                 
-                if day_visits:
-                    yield date_str, day_visits
+                # Filter for only NEW visits
+                new_visits = []
+                for v in day_visits:
+                    v_id = str(v.get("visitId"))
+                    if v_id not in seen_ids:
+                        new_visits.append(v)
+                        seen_ids.add(v_id)
+                
+                if new_visits:
+                    self.logger.info(f"CONTINUOUS_FETCH: Found {len(new_visits)} NEW visits out of {len(day_visits)} total")
+                    yield date_str, new_visits
+                    # Save updated state
+                    self._save_seen_visits(branch_id, date_str, seen_ids)
                 else:
-                    self.logger.info(f"CONTINUOUS_FETCH: No visits found yet for {date_str}")
+                    self.logger.info(f"CONTINUOUS_FETCH: No new visits found for {date_str} (Checked {len(day_visits)} total)")
                 
             except Exception as e:
                 self.logger.error(f"CONTINUOUS_FETCH: Error in loop: {e}", exc_info=True)

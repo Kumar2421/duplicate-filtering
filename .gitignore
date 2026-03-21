@@ -1,0 +1,14 @@
+# Python environments
+venv/
+.venv/
+
+# Local runtime/data artifacts
+data/
+qdrant_db/
+
+# Logs and OS/editor noise
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

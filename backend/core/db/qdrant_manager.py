@@ -48,6 +48,29 @@ class QdrantManager:
             self.logger.error(f"Error ensuring Qdrant collection: {e}")
             raise
 
+    def visit_exists(self, branch_id: str, date: str, visit_id: str) -> bool:
+        """
+        Checks if a visit already exists in the collection.
+        """
+        try:
+            result = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(key="branchId", match=models.MatchValue(value=str(branch_id))),
+                        models.FieldCondition(key="date", match=models.MatchValue(value=str(date))),
+                        models.FieldCondition(key="visitId", match=models.MatchValue(value=str(visit_id))),
+                    ]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False
+            )
+            return len(result[0]) > 0
+        except Exception as e:
+            self.logger.error(f"Error checking visit existence: {e}")
+            return False
+
     def upsert_batch(self, points: List[EmbeddingPoint]) -> int:
         if not points:
             return 0
@@ -84,5 +107,5 @@ def make_point_id(visit_id: str, event_id: Optional[str], image_type: str, ts_ms
     ts_ms = int(ts_ms or (time.time() * 1000))
     eid = event_id if event_id is not None else "primary"
     # Create a deterministic UUID from the combined string to satisfy Qdrant's requirement
-    seed = f"{visit_id}:{image_type}:{eid}:{ts_ms}"
+    seed = f"{visit_id}:{image_type}:{eid}"
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))

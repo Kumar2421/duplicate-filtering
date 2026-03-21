@@ -152,6 +152,16 @@ class IngestionPipeline:
 
             try:
                 visit_ctx = normalize_visit(raw_visit)
+                
+                # Check Layer 2: Qdrant existence
+                if self.qdrant.visit_exists(
+                    str(visit_ctx["branchId"]),
+                    str(visit_ctx["date"]),
+                    str(visit_ctx["visitId"])
+                ):
+                    self.logger.info(f"INGESTION: Skipping existing visit {visit_ctx['visitId']}")
+                    continue
+
                 metrics.total_visits_processed += 1
 
                 images: List[NormalizedImage] = list(visit_ctx.get("images") or [])
