@@ -1,10 +1,29 @@
 # Python environments
 venv/
 .venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node.js
+node_modules/
+frontend/node_modules/
+dist/
+build/
+.npm
+.eslintcache
 
 # Local runtime/data artifacts
 data/
 qdrant_db/
+backend/qdrant_db/
+core/state/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
 
 # Logs and OS/editor noise
 *.log
@@ -12,5 +31,8 @@ qdrant_db/
 Thumbs.db
 .idea/
 .vscode/
-
-data/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
