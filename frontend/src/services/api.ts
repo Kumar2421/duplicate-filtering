@@ -1,6 +1,10 @@
 import axios from 'axios';
 
-export const BASE_URL = 'http://localhost:8000';
+// In production/staging, hit the actual server's domain/IP instead of 'localhost'
+// to avoid "loopback address space" CORS blocks from secure domains like https://.
+export const BASE_URL = typeof window !== 'undefined' && window.location.hostname !== 'localhost'
+  ? `${window.location.protocol}//${window.location.hostname}:8009`
+  : 'http://localhost:8009';
 
 const api = axios.create({
   baseURL: BASE_URL,

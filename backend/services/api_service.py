@@ -4,7 +4,7 @@ import asyncio
 import logging
 import pytz
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, AsyncGenerator, Set
 from backend.utils.normalizer import normalize_visit_data, fetch_and_prepare
 
@@ -15,7 +15,7 @@ class APIService:
         api_key: str = None,
         limit: int = 50,
         category: str = "potential",
-        time_range: str = "0,300,18000",
+        time_range: str = "0,300,18000"
     ):
         self.base_url = base_url
         self.api_key = api_key
@@ -119,80 +119,67 @@ class APIService:
             
         return all_visits
 
-    async def fetch_visits_continuously(self, branch_id: str, interval_minutes: int = 5) -> AsyncGenerator[tuple[str, List[Dict[str, Any]]], None]:
+    async def fetch_incremental_pages(self, branch_id: str, date: str, last_updated: Optional[str] = None) -> AsyncGenerator[List[Dict[str, Any]], None]:
         """
-        Continuously fetch visits for the current date (IST/UTC+5:30).
-        Yields only NEW (unseen) visits periodically.
+        Polls the API page by page. 
+        Yields a page only if it contains visits newer than last_updated.
+        Stops once a page contains visits older than last_updated (since they are sorted newest first).
         """
-        ist = pytz.timezone('Asia/Kolkata')
-        
-        while True:
+        page = 0
+        last_ts = None
+        if last_updated:
             try:
-                now_ist = datetime.now(ist)
-                date_str = now_ist.strftime("%Y-%m-%d")
-                self.logger.info(f"CONTINUOUS_FETCH: Initiating fetch for {date_str} at {now_ist.strftime('%H:%M:%S')} IST")
-                
-                # Layer 1: Persistent State Tracking
-                seen_ids = self._load_seen_visits(branch_id, date_str)
-                
-                # Fetch all visits for today
-                day_visits = await self.fetch_visits_for_date(branch_id, date_str)
-                
-                # Filter for only NEW visits
-                new_visits = []
-                for v in day_visits:
-                    v_id = str(v.get("visitId"))
-                    if v_id not in seen_ids:
-                        new_visits.append(v)
-                        seen_ids.add(v_id)
-                
-                if new_visits:
-                    self.logger.info(f"CONTINUOUS_FETCH: Found {len(new_visits)} NEW visits out of {len(day_visits)} total")
-                    yield date_str, new_visits
-                    # Save updated state
-                    self._save_seen_visits(branch_id, date_str, seen_ids)
+                # Normalize last_updated to UTC-aware datetime
+                last_ts = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
                 else:
-                    self.logger.info(f"CONTINUOUS_FETCH: No new visits found for {date_str} (Checked {len(day_visits)} total)")
-                
+                    last_ts = last_ts.astimezone(timezone.utc)
             except Exception as e:
-                self.logger.error(f"CONTINUOUS_FETCH: Error in loop: {e}", exc_info=True)
-            
-            self.logger.info(f"CONTINUOUS_FETCH: Sleeping for {interval_minutes} minutes...")
-            await asyncio.sleep(interval_minutes * 60)
+                self.logger.error(f"Error parsing last_updated '{last_updated}': {e}")
+                last_ts = None
 
-    async def fetch_visits(
-        self,
-        branch_id: str,
-        start_date: str,
-        end_date: str,
-        time_range: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Deliverable: Primary function to fetch and normalize visit data for a date range.
-        Returns {visits: [...], total: N}
-        """
-        start = datetime.strptime(start_date, "%Y-%m-%d")
-        end = datetime.strptime(end_date, "%Y-%m-%d")
-        
-        delta = end - start
-        date_list = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta.days + 1)]
-        
-        raw_results = []
-        for date_str in date_list:
-            day_visits = await self.fetch_visits_for_date(branch_id, date_str, time_range=time_range)
-            raw_results.extend(day_visits)
-        
-        # Normalize data
-        normalized_visits = []
-        for v in raw_results:
-            nv = normalize_visit_data(v)
-            if nv:
-                normalized_visits.append(nv)
-        
-        return {
-            "visits": normalized_visits,
-            "total": len(normalized_visits),
-        }
+        while True:
+            data = await self.fetch_page(branch_id, date, page)
+            visits = data.get("visits", [])
+            if not visits:
+                break
+
+            new_in_page = []
+            reached_old_data = False
+            
+            for v in visits:
+                v_updated_at = v.get("updatedAt")
+                if not v_updated_at:
+                    new_in_page.append(v)
+                    continue
+                
+                try:
+                    # Normalize v_ts to UTC-aware datetime
+                    v_ts = datetime.fromisoformat(v_updated_at.replace('Z', '+00:00'))
+                    if v_ts.tzinfo is None:
+                        v_ts = v_ts.replace(tzinfo=timezone.utc)
+                    else:
+                        v_ts = v_ts.astimezone(timezone.utc)
+                    
+                    if not last_ts or v_ts > last_ts:
+                        new_in_page.append(v)
+                    else:
+                        reached_old_data = True
+                except Exception as e:
+                    self.logger.error(f"Error parsing updatedAt for visit: {e}")
+                    # If we can't parse, we skip it to be safe (don't treat as new by default)
+                    continue
+
+            if new_in_page:
+                self.logger.info(f"API_WATCH: Yielding {len(new_in_page)} new visits from page {page}")
+                yield new_in_page
+
+            if reached_old_data or len(visits) < self.limit:
+                break
+            
+            page += 1
+
     async def send_conformation_action(self, branch_id: str, date: str, action_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Proxy call to v3 conformation/action API.

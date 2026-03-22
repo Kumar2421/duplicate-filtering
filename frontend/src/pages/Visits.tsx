@@ -2,10 +2,9 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
 import { fetchAllVisits, BASE_URL } from '../services/api';
-import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
-import { Search, MapPin, RefreshCw, User, ImageIcon, X } from 'lucide-react';
+import { Search, MapPin, RefreshCw, ImageIcon, X, AlertCircle } from 'lucide-react';
 import { DateSelector } from '../components/DateSelector';
 
 const Visits: React.FC = () => {
@@ -17,109 +16,148 @@ const Visits: React.FC = () => {
         queryFn: () => fetchAllVisits(currentBranch, dateRange.startDate),
     });
 
-    // Flatten all images from all visits
-    const allImageItems = data?.visits?.flatMap((visit: any, vIdx: number) => {
-        if (visit.allImages && visit.allImages.length > 0) {
-            return visit.allImages.map((img: any, iIdx: number) => ({
-                ...visit,
-                // Ensure unique key by combining visitId, image name, and indices
-                uniqueKey: `${visit.visitId || vIdx}-${img.name}-${iIdx}`,
-                currentUrl: img.url,
-                currentName: img.name,
-                isPrimary: img.isPrimary
-            }));
-        }
-
-        // Fallback to primary image if allImages is missing or empty
-        return [{
-            ...visit,
-            uniqueKey: `${visit.visitId || vIdx}-fallback`,
-            currentUrl: visit.image || visit.imageUrl,
-            currentName: 'primary.jpg',
-            isPrimary: true
-        }];
-    }) || [];
+    if (error) {
+        return (
+            <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
+                <AlertCircle className="w-12 h-12 text-red-500" />
+                <h2 className="text-xl font-bold text-slate-800">Connection Failed</h2>
+                <Button onClick={() => refetch()} variant="outline">Retry Sync</Button>
+            </div>
+        );
+    }
 
     const stats = {
-        totalImages: allImageItems.length,
+        totalImages: data?.visits?.reduce((acc: number, v: any) => acc + (v.allImages?.length || 1), 0) || 0,
         uniqueVisits: data?.visits?.length || 0,
         uniqueCustomers: new Set(data?.visits?.map((v: any) => v.customerId)).size
     };
 
     return (
-        <div className="min-h-screen bg-slate-50 p-6 space-y-6">
-            {/* Header / Stats */}
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white p-6 rounded-2xl border shadow-sm">
+        <div className="p-6 space-y-6 bg-slate-50 min-h-screen">
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div className="space-y-1">
-                    <h1 className="text-3xl font-black text-slate-900 tracking-tight">Visit Gallery</h1>
-                    <div className="flex items-center gap-4 text-xs font-bold text-slate-500 uppercase tracking-widest">
-                        <span className="flex items-center gap-1.5"><User className="w-3.5 h-3.5 text-blue-500" /> {stats.uniqueCustomers} Customers</span>
-                        <span className="flex items-center gap-1.5"><ImageIcon className="w-3.5 h-3.5 text-blue-500" /> {stats.totalImages} Images</span>
-                    </div>
+                    <h1 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+                        <ImageIcon className="text-blue-600" />
+                        Visit Records
+                    </h1>
+                    <p className="text-slate-500 font-bold text-xs uppercase tracking-widest">
+                        Showing {stats.uniqueVisits} visits for {dateRange.startDate}
+                    </p>
                 </div>
+                <Button
+                    variant="secondary"
+                    onClick={() => refetch()}
+                    disabled={isLoading}
+                    className="bg-white border shadow-sm font-black text-xs uppercase tracking-widest px-6 h-11 rounded-xl"
+                >
+                    <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
+                    Refresh Logs
+                </Button>
+            </div>
 
-                <div className="flex items-center gap-3">
-                    <div className="hidden lg:flex items-center gap-2 px-3 h-10 bg-slate-100 rounded-xl border text-[10px] font-black uppercase text-slate-600">
+            {/* Filter Bar */}
+            <div className="flex flex-col md:flex-row gap-3 bg-white p-3 rounded-2xl border shadow-sm items-center">
+                <div className="flex-1 relative w-full">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+                    <Input placeholder="Filter by Visit ID or Customer ID..." className="pl-12 h-11 bg-slate-50 border-none rounded-xl text-sm font-medium" />
+                </div>
+                <div className="flex gap-2 w-full md:w-auto">
+                    <div className="hidden lg:flex items-center gap-2 px-4 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-600">
                         <MapPin className="w-3 h-3 text-blue-500" /> {currentBranch}
                     </div>
                     <DateSelector />
-                    <Button onClick={() => refetch()} variant="secondary" className="h-10 px-6 font-black text-xs uppercase tracking-widest gap-2 bg-slate-900 text-white hover:bg-slate-800 rounded-xl">
-                        <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-                        Sync Data
+                    <Button className="flex-1 md:flex-initial h-11 bg-blue-600 hover:bg-blue-700 text-white font-black uppercase text-xs tracking-widest px-8 rounded-xl shadow-lg shadow-blue-100">
+                        Apply Filters
                     </Button>
                 </div>
             </div>
 
-            {/* Filter Bar */}
-            <div className="relative group">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
-                <Input
-                    placeholder="Search images by Visit ID, Customer ID, or tag..."
-                    className="h-12 pl-12 bg-white border-slate-200 rounded-xl shadow-sm focus:ring-blue-500 transition-all font-medium text-slate-600 text-sm"
-                />
-            </div>
-
-            {/* Flattened Image Grid */}
             {isLoading ? (
-                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-                    {Array.from({ length: 24 }).map((_, i) => (
-                        <div key={i} className="aspect-[3/4] bg-slate-200 animate-pulse rounded-xl" />
-                    ))}
-                </div>
-            ) : (
-                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-                    {allImageItems.map((item: any) => (
-                        <div
-                            key={item.uniqueKey}
-                            onClick={() => setSelectedItem(item)}
-                            className="group relative aspect-[3/4] overflow-hidden rounded-xl bg-white border border-slate-200 shadow-sm cursor-pointer hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 ring-0 hover:ring-2 hover:ring-blue-500"
-                        >
-                            <img
-                                src={item.currentUrl.startsWith('/') ? `${BASE_URL}${item.currentUrl}` : item.currentUrl}
-                                loading="lazy"
-                                className="w-full h-full object-cover transition-all duration-500 group-hover:scale-110"
-                                onError={(e: any) => e.target.src = 'https://placehold.co/300x400?text=No+Photo'}
-                            />
-
-                            {/* Hover Overlay */}
-                            <div className="absolute inset-0 bg-slate-900/70 opacity-0 group-hover:opacity-100 transition-all duration-300 flex flex-col justify-end p-2 pb-3 backdrop-blur-[2px]">
-                                <div className="space-y-0.5">
-                                    <p className="text-[8px] font-black text-blue-400 uppercase tracking-tighter">CID: {item.customerId}</p>
-                                    <p className="text-[7px] font-bold text-white/50 uppercase tracking-widest">{item.branchId || currentBranch}</p>
-                                    <div className="h-px bg-white/10 my-1" />
-                                    <p className="text-[9px] font-black text-white leading-tight">Visit #{item.visitId || 'N/A'}</p>
-                                    <p className="text-[8px] font-bold text-slate-300">{item.time || 'Unknown'}</p>
-                                </div>
-                            </div>
-
-                            {/* Badges */}
-                            <div className="absolute top-2 right-2">
-                                <span className={`text-[7px] font-black px-1.5 py-0.5 rounded shadow-lg backdrop-blur-md uppercase ${item.isPrimary ? 'bg-blue-600 text-white' : 'bg-slate-800/80 text-slate-200'}`}>
-                                    {item.isPrimary ? 'Primary' : 'Event'}
-                                </span>
+                <div className="space-y-8">
+                    {[1, 2, 3].map(i => (
+                        <div key={i} className="space-y-4">
+                            <div className="h-6 w-48 bg-slate-200 animate-pulse rounded" />
+                            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
+                                {Array.from({ length: 8 }).map((_, j) => (
+                                    <div key={j} className="aspect-[3/4] bg-slate-200 animate-pulse rounded-xl" />
+                                ))}
                             </div>
                         </div>
                     ))}
+                </div>
+            ) : (
+                <div className="space-y-10">
+                    {data?.visits?.map((visit: any, idx: number) => {
+                        const images = visit.allImages && visit.allImages.length > 0
+                            ? visit.allImages
+                            : [{ url: visit.image || visit.imageUrl, name: 'primary.jpg', isPrimary: true }];
+
+                        return (
+                            <div key={visit.visitId || idx} className="space-y-4">
+                                {/* Visit Header */}
+                                <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                                    <div className="flex items-center gap-4">
+                                        <div className="flex flex-wrap gap-2">
+                                            <span className="text-[10px] font-black bg-slate-900 text-white px-2 py-0.5 rounded-lg uppercase tracking-tighter">
+                                                {visit.customerId}
+                                            </span>
+                                        </div>
+                                        <span className="text-xs font-bold text-slate-400">
+                                            Visit #{visit.visitId}
+                                        </span>
+                                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">
+                                            {visit.time}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                {/* Grid of Images for this visit */}
+                                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
+                                    {images.map((img: any, iIdx: number) => (
+                                        <div
+                                            key={`${visit.visitId}-${img.name}-${iIdx}`}
+                                            onClick={() => setSelectedItem({
+                                                ...visit,
+                                                currentUrl: img.url,
+                                                currentName: img.name,
+                                                isPrimary: img.isPrimary
+                                            })}
+                                            className="group relative aspect-[3/4] rounded-xl overflow-hidden bg-white border border-slate-100 shadow-sm transition-all hover:ring-2 hover:ring-blue-500 hover:shadow-xl cursor-pointer"
+                                        >
+                                            <img
+                                                src={img.url.startsWith('/') ? `${BASE_URL}${img.url}` : img.url}
+                                                className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                                                onError={(e: any) => e.target.src = 'https://placehold.co/300x400?text=No+Photo'}
+                                                loading="lazy"
+                                            />
+
+                                            {/* Hover Overlay */}
+                                            <div className="absolute inset-0 bg-slate-900/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pb-3 backdrop-blur-[1px]">
+                                                <p className="text-[8px] font-bold text-blue-300 uppercase tracking-tighter truncate">{img.name}</p>
+                                                <p className="text-[9px] font-black text-white leading-tight">Visit #{visit.visitId}</p>
+                                                <p className="text-[8px] font-bold text-slate-300 mt-1">{visit.time}</p>
+                                            </div>
+
+                                            {/* Primary Badge */}
+                                            {img.isPrimary && (
+                                                <div className="absolute top-2 right-2">
+                                                    <div className="w-2 h-2 bg-blue-500 rounded-full shadow-[0_0_8px_rgba(59,130,246,1)]" />
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
+            {data?.visits?.length === 0 && !isLoading && (
+                <div className="flex flex-col items-center justify-center py-32 bg-white rounded-3xl border border-dashed border-slate-200 shadow-inner">
+                    <AlertCircle className="w-16 h-16 text-slate-200 mb-4" />
+                    <h3 className="text-xl font-black text-slate-900 uppercase tracking-widest">No Visits Found</h3>
+                    <p className="text-slate-400 font-bold mt-2">No visits recorded for this period.</p>
                 </div>
             )}
 

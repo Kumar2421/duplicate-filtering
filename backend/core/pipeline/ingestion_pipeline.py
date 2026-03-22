@@ -137,7 +137,7 @@ class IngestionPipeline:
             self.logger.error(f"Error processing image: {e}\n{traceback.format_exc()}")
             return None
 
-    async def process_visits(self, visits: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    async def process_visits(self, visits: Iterable[Dict[str, Any]], force_reprocess: bool = False) -> Dict[str, Any]:
         metrics = PipelineMetrics()
         points_to_store: List[EmbeddingPoint] = []
 
@@ -154,7 +154,7 @@ class IngestionPipeline:
                 visit_ctx = normalize_visit(raw_visit)
                 
                 # Check Layer 2: Qdrant existence
-                if self.qdrant.visit_exists(
+                if not force_reprocess and self.qdrant.visit_exists(
                     str(visit_ctx["branchId"]),
                     str(visit_ctx["date"]),
                     str(visit_ctx["visitId"])
@@ -175,7 +175,13 @@ class IngestionPipeline:
                 img_map = {}
                 for img in images:
                     event_file_id = str(img.eventId) if img.eventId else "primary"
-                    # Check if we already have the original image
+                    
+                    # WATERMARK CHECK: Skip if eventId already exists in Qdrant
+                    if img.eventId and self.qdrant.event_exists(img.eventId):
+                        self.logger.info(f"INGESTION: Skipping already processed eventId {img.eventId}")
+                        continue
+
+                    # Check if we already have the original image on disk
                     if not self.file_manager.has_original(
                         str(visit_ctx["branchId"]), 
                         str(visit_ctx["date"]), 

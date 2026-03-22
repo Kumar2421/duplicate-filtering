@@ -48,6 +48,29 @@ class QdrantManager:
             self.logger.error(f"Error ensuring Qdrant collection: {e}")
             raise
 
+    def event_exists(self, event_id: str) -> bool:
+        """
+        Checks if a specific eventId (watermark) already exists in the collection.
+        """
+        if not event_id:
+            return False
+        try:
+            result = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(key="eventId", match=models.MatchValue(value=str(event_id))),
+                    ]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False
+            )
+            return len(result[0]) > 0
+        except Exception as e:
+            self.logger.error(f"Error checking event existence: {e}")
+            return False
+
     def visit_exists(self, branch_id: str, date: str, visit_id: str) -> bool:
         """
         Checks if a visit already exists in the collection.

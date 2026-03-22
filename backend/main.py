@@ -4,6 +4,7 @@ import os
 import asyncio
 import signal
 import sys
+import pytz
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Depends, Query, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,8 +41,28 @@ def load_config():
 
 config = load_config()
 
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+class PrivateNetworkMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.method == "OPTIONS":
+            response = Response()
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "*"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+            response.headers["Access-Control-Allow-Private-Network"] = "true"
+            return response
+        
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+
 # Initialization logics
 app = FastAPI(title="Duplicate Detection Platform Middleware")
+
+# Add Private Network Access Middleware BEFORE CORS
+app.add_middleware(PrivateNetworkMiddleware)
 
 # CORS middleware for React
 app.add_middleware(
@@ -50,6 +71,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Apply GZip compression to all responses
@@ -86,7 +108,7 @@ api_service = APIService(
     api_key=config["api"].get("api_key"),
     limit=config["api"].get("limit", 50),
     category=config["api"].get("category", "potential"),
-    time_range=config["api"].get("timeRange", "0,300,18000"),
+    time_range=config["api"].get("timeRange", "0,300,18000")
 )
 
 # Use one shared QdrantManager/client to avoid "Storage folder already accessed"
@@ -128,75 +150,85 @@ ingestion_pipeline = IngestionPipeline(
 cluster_writer = JsonClusterWriter()
 cluster_service = ClusterService(qdrant_manager=qdrant_manager)
 
-# Auto-trigger logic
+# Add a simple background task runner for sync
+async def run_pipeline_sync():
+    """
+    Background task that fetches new visits since lastUpdated and processes them in real-time.
+    """
+    branch_id = config["api"].get("branchId", "TMJ-CBE")
+    interval = config["api"].get("fetchInterval", 2) # Default 2 mins
+    
+    logging.info(f"PIPELINE: Starting background sync for {branch_id}")
+    
+    while True:
+        try:
+            now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
+            date_str = now_ist.strftime("%Y-%m-%d")
+            
+            # 1. Load existing cluster manifest to get lastUpdated
+            existing_data = cluster_writer.load_visit_clusters(branch_id, date_str)
+            last_updated = None
+            if existing_data and "meta" in existing_data:
+                last_updated = existing_data["meta"].get("lastUpdated")
+            
+            # 2. Fetch new visits from API page by page and process immediately
+            pages_processed = 0
+            async for new_visits in api_service.fetch_incremental_pages(branch_id, date_str, last_updated):
+                logging.info(f"PIPELINE: Processing {len(new_visits)} new visits for {date_str}")
+                
+                # 3. Ingest (Embeddings -> Qdrant)
+                loop = asyncio.get_running_loop()
+                def process_sync(v_list):
+                    new_loop = asyncio.new_event_loop()
+                    try:
+                        return new_loop.run_until_complete(ingestion_pipeline.process_visits(v_list))
+                    finally:
+                        new_loop.close()
+
+                ingest_res = await loop.run_in_executor(executor, process_sync, new_visits)
+                logging.info(f"PIPELINE: Ingestion completed - {ingest_res.get('metrics')}")
+
+                # 4. Identity Resolution (Clustering)
+                # Re-load manifest each time to ensure we have the absolute latest state before updating
+                latest_manifest = cluster_writer.load_visit_clusters(branch_id, date_str)
+                
+                # Check if we actually have anything to cluster (points in Qdrant)
+                # This prevents empty lastUpdated updates when no ingestion happened
+                def cluster_sync(b_id, d_str, e_data):
+                    new_loop = asyncio.new_event_loop()
+                    try:
+                        return new_loop.run_until_complete(cluster_service.get_clusters_for_date(
+                            branch_id=b_id, 
+                            date=d_str, 
+                            existing_data=e_data
+                        ))
+                    finally:
+                        new_loop.close()
+
+                cluster_res = await loop.run_in_executor(executor, cluster_sync, branch_id, date_str, latest_manifest)
+                
+                # Only save and increment if we actually processed something or cluster_res is valid
+                cluster_writer.save_visit_clusters(branch_id, date_str, cluster_res)
+                logging.info(f"PIPELINE: Clustering updated - {cluster_res.get('meta')}")
+                pages_processed += 1
+
+            if pages_processed == 0:
+                # IMPORTANT: If no new visits were found, we DON'T update the manifest's lastUpdated
+                # to the current time, because we haven't actually checked any new data.
+                # The next cycle will use the same lastUpdated to check the API again.
+                logging.info(f"PIPELINE: No new visits found for {date_str}")
+
+        except Exception as e:
+            logging.error(f"PIPELINE ERROR: {e}", exc_info=True)
+        
+        logging.info(f"PIPELINE: Sleeping for {interval} minutes...")
+        await asyncio.sleep(interval * 60)
+
 @app.on_event("startup")
 async def startup_event():
     logging.info("Application starting up...")
-    # Check if auto-trigger is enabled in config
-    if config.get("api", {}).get("auto_ingest", True):
-        branch_id = config["api"].get("branchId", "TMJ-CBE")
-        start_date = config["api"].get("startDate", "2026-03-20")
-        end_date = config["api"].get("endDate", "2026-03-20")
-        time_range = config["api"].get("timeRange", "0,300,18000")
-        
-        logging.info(f"AUTO-TRIGGER: Initiating ingestion for branch={branch_id}, range={start_date} to {end_date}")
-        
-        async def run_continuous_ingestion():
-            """
-            Background task for continuous fetching and processing using IST.
-            """
-            branch_id = config["api"].get("branchId", "TMJ-CBE")
-            interval = config["api"].get("fetchInterval", 5) # Default 5 mins
-            
-            logging.info(f"BACKGROUND_PIPE: Starting continuous ingestion for {branch_id}")
-            
-            async for date_str, day_visits in api_service.fetch_visits_continuously(branch_id, interval):
-                try:
-                    # Process in batches of 50
-                    batch_size = 50
-                    for i in range(0, len(day_visits), batch_size):
-                        batch = day_visits[i : i + batch_size]
-                        
-                        # Define sync-async wrappers for ThreadPoolExecutor
-                        loop = asyncio.get_running_loop()
-                        
-                        def process_sync(v_batch):
-                            new_loop = asyncio.new_event_loop()
-                            try:
-                                return new_loop.run_until_complete(ingestion_pipeline.process_visits(v_batch))
-                            finally:
-                                new_loop.close()
-
-                        # 1. Ingest (Embeddings -> Qdrant)
-                        ingest_res = await loop.run_in_executor(executor, process_sync, batch)
-                        logging.info(f"BACKGROUND_PIPE BATCH INGESTED: {date_str} - {ingest_res.get('metrics')}")
-
-                        # 2. Identity Resolution
-                        existing_data = cluster_writer.load_visit_clusters(branch_id, date_str)
-                        
-                        def cluster_sync(b_id, d_str, e_data):
-                            new_loop = asyncio.new_event_loop()
-                            try:
-                                return new_loop.run_until_complete(cluster_service.get_clusters_for_date(
-                                    branch_id=b_id, 
-                                    date=d_str, 
-                                    existing_data=e_data
-                                ))
-                            finally:
-                                new_loop.close()
-
-                        cluster_res = await loop.run_in_executor(executor, cluster_sync, branch_id, date_str, existing_data)
-                        
-                        # Save updated JSON
-                        cluster_writer.save_visit_clusters(branch_id, date_str, cluster_res)
-                        logging.info(f"BACKGROUND_PIPE BATCH CLUSTERED: {date_str} - {cluster_res.get('meta')}")
-                        
-                        await asyncio.sleep(0.1)
-                except Exception as e:
-                    logging.error(f"BACKGROUND_PIPE ERROR: {e}", exc_info=True)
-
-        # Start the background task
-        asyncio.create_task(run_continuous_ingestion())
+    # Start the background pipeline sync
+    asyncio.create_task(run_pipeline_sync())
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -400,4 +432,4 @@ async def get_system_metrics():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8009)

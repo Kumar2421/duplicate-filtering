@@ -1,7 +1,7 @@
 {
   "api": {
     "base_url": "https://api.analytics.thefusionapps.com/api/v4/retail/visit-stats",
-    "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjUyLCJicmFuY2hJZCI6IlRNSi1DQkUifSwiaWF0IjoxNzczOTg4MzY0LCJleHAiOjE3NzQwNzQ3NjR9.MbT0RwfPWZB6zPDoZLOK81s9j3ileyg7UYhUHN5FfRc",
+    "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjUyLCJicmFuY2hJZCI6IlRNSi1DQkUifSwiaWF0IjoxNzc0MDk0NzMyLCJleHAiOjE3NzQxODExMzJ9.doTg2uzhiLnhRow8-YHL19e_i_cURNYgjliRgArSA1w",
     "limit": 50,
     "category": "potential",
     "timeRange": "0,300,18000",

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Users, UserPlus, Menu, X, Bell, ChevronDown, LogOut, Settings } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
@@ -24,7 +24,7 @@ const SidebarItem = ({ to, icon: Icon, label, active }: { to: string, icon: any,
 
 const Layout = ({ children }: { children: React.ReactNode }) => {
   const { pathname } = useLocation();
-  const { sidebarOpen, setSidebarOpen, currentBranch, setCurrentBranch } = useAppStore();
+  const { sidebarOpen, setSidebarOpen, currentBranch } = useAppStore();
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden font-sans text-slate-900">

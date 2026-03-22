@@ -1,10 +1,9 @@
 import React from 'react';
 import { useSystemMetrics } from '../hooks/useMetrics';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'; // Later
 
 const Dashboard: React.FC = () => {
-  const { data: metrics, isLoading } = useSystemMetrics();
+  const { data: metrics } = useSystemMetrics();
 
   // Mock stats if not available
   const stats = metrics?.stats || {

@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import os
 import numpy as np
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from qdrant_client.http import models
@@ -18,12 +19,17 @@ class ClusterService:
         self.classifier = ClusterClassifier()
         self.logger = logging.getLogger(__name__)
 
-    async def get_clusters_for_date(self, branch_id: str, date: str, existing_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def get_clusters_for_date(self, branch_id: str, date: str, existing_data: Optional[Dict[str, Any]] = None, force_reprocess: bool = False) -> Dict[str, Any]:
         """
         Fetch embeddings from Qdrant, build visit vectors, cluster, and classify.
         Supports incremental updates by merging with existing_data.
         """
         self.logger.info(f"Starting identity resolution for {branch_id} on {date}")
+        
+        # If force_reprocess is True, we don't merge with existing_data (start fresh)
+        if force_reprocess:
+            self.logger.info(f"CLUSTER_SERVICE: force_reprocess is TRUE, ignoring existing_data")
+            existing_data = None
         
         # Step 1: Fetch all points for branch + date from Qdrant
         self.logger.info(f"Searching in collection: {self.qdrant.collection_name}")
@@ -51,7 +57,7 @@ class ClusterService:
                     "totalClusters": 0,
                     "duplicateClusters": 0,
                     "conflictClusters": 0,
-                    "lastUpdated": str(np.datetime64('now')),
+                    "lastUpdated": datetime.now(timezone.utc).isoformat() + 'Z',
                 }
             }
 
@@ -75,7 +81,7 @@ class ClusterService:
                     "totalClusters": 0,
                     "duplicateClusters": 0,
                     "conflictClusters": 0,
-                    "lastUpdated": str(np.datetime64('now')),
+                    "lastUpdated": datetime.now(timezone.utc).isoformat() + 'Z',
                 },
             }
 
@@ -207,6 +213,6 @@ class ClusterService:
             "meta": {
                 "totalClusters": len(output_clusters),
                 "totalVisits": sum(len(c["visits"]) for c in output_clusters),
-                "lastUpdated": str(np.datetime64('now'))
+                "lastUpdated": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             }
         }
