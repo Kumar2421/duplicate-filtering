@@ -9,6 +9,7 @@ import { DateSelector } from '../components/DateSelector';
 
 const Duplicates: React.FC = () => {
   const { currentBranch, dateRange } = useAppStore();
+  const [searchQuery, setSearchQuery] = React.useState('');
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['duplicate-clusters', currentBranch, dateRange.startDate],
@@ -21,9 +22,23 @@ const Duplicates: React.FC = () => {
     return;
   };
 
-  const filteredClusters = data?.clusters?.filter((c: any) =>
-    (c.visits?.length || 0) >= 2
-  ) || [];
+  const filteredClusters = data?.clusters?.filter((c: any) => {
+    const matchesVisits = (c.visits?.length || 0) >= 2;
+    if (!matchesVisits) return false;
+    
+    if (!searchQuery.trim()) return true;
+    
+    const query = searchQuery.toLowerCase().trim();
+    const hasMatchingCustomerId = c.customerIds?.some((id: string) => 
+      id.toLowerCase().includes(query)
+    );
+    const hasMatchingClusterId = c.clusterId?.toLowerCase().includes(query);
+    const hasMatchingVisitId = c.visits?.some((v: any) => 
+      v.visitId?.toLowerCase().includes(query)
+    );
+
+    return hasMatchingCustomerId || hasMatchingClusterId || hasMatchingVisitId;
+  }) || [];
 
   if (error) {
     return (
@@ -62,7 +77,12 @@ const Duplicates: React.FC = () => {
       <div className="flex flex-col md:flex-row gap-3 bg-white p-3 rounded-2xl border shadow-sm items-center">
         <div className="flex-1 relative w-full">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
-          <Input placeholder="Filter by Cluster ID or Customer Profile..." className="pl-12 h-11 bg-slate-50 border-none rounded-xl text-sm font-medium" />
+          <Input 
+            placeholder="Filter by Cluster ID or Customer Profile..." 
+            className="pl-12 h-11 bg-slate-50 border-none rounded-xl text-sm font-medium"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
         </div>
         <div className="flex gap-2 w-full md:w-auto">
           <div className="hidden lg:flex items-center gap-2 px-4 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-600">

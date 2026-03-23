@@ -15,13 +15,15 @@ class APIService:
         api_key: str = None,
         limit: int = 50,
         category: str = "potential",
-        time_range: str = "0,300,18000"
+        time_range: str = "0,300,18000",
+        enabled: bool = True,
     ):
         self.base_url = base_url
         self.api_key = api_key
         self.limit = limit
         self.category = category
         self.time_range = time_range
+        self.enabled = enabled
         self.logger = logging.getLogger(__name__)
         self.state_dir = "data/state"
         os.makedirs(self.state_dir, exist_ok=True)
@@ -58,6 +60,10 @@ class APIService:
         """
         Fetch a single page for a specific date with retry logic.
         """
+        if not self.enabled:
+            self.logger.info("API Fetching is disabled in config.")
+            return {}
+
         effective_time_range = time_range if time_range is not None else self.time_range
         params = {
             "branchId": branch_id,

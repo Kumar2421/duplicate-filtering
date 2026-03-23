@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
 import { fetchAllVisits, BASE_URL } from '../services/api';
@@ -9,6 +9,7 @@ import { DateSelector } from '../components/DateSelector';
 
 const Visits: React.FC = () => {
     const { currentBranch, dateRange } = useAppStore();
+    const [searchQuery, setSearchQuery] = useState('');
     const [selectedItem, setSelectedItem] = useState<any>(null);
 
     const { data, isLoading, error, refetch } = useQuery({
@@ -26,10 +27,33 @@ const Visits: React.FC = () => {
         );
     }
 
+    const flattenedVisits = useMemo(() => {
+        if (!data?.clusters) return [];
+
+        let visits = data.clusters.flatMap((cluster: any) =>
+            cluster.visits.map((visit: any) => ({
+                ...visit,
+                clusterType: cluster.type,
+                clusterCustomerIds: cluster.customerIds
+            }))
+        );
+
+        if (searchQuery.trim()) {
+            const query = searchQuery.toLowerCase().trim();
+            visits = visits.filter((v: any) =>
+                v.customerId?.toLowerCase().includes(query) ||
+                v.visitId?.toLowerCase().includes(query) ||
+                v.clusterCustomerIds?.some((id: string) => id.toLowerCase().includes(query))
+            );
+        }
+
+        return visits;
+    }, [data, searchQuery]);
+
     const stats = {
-        totalImages: data?.visits?.reduce((acc: number, v: any) => acc + (v.allImages?.length || 1), 0) || 0,
-        uniqueVisits: data?.visits?.length || 0,
-        uniqueCustomers: new Set(data?.visits?.map((v: any) => v.customerId)).size
+        totalImages: flattenedVisits?.reduce((acc: number, v: any) => acc + (v.allImages?.length || 1), 0) || 0,
+        uniqueVisits: flattenedVisits?.length || 0,
+        uniqueCustomers: new Set(flattenedVisits?.map((v: any) => v.customerId)).size
     };
 
     return (
@@ -59,7 +83,12 @@ const Visits: React.FC = () => {
             <div className="flex flex-col md:flex-row gap-3 bg-white p-3 rounded-2xl border shadow-sm items-center">
                 <div className="flex-1 relative w-full">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
-                    <Input placeholder="Filter by Visit ID or Customer ID..." className="pl-12 h-11 bg-slate-50 border-none rounded-xl text-sm font-medium" />
+                    <Input
+                        placeholder="Search by Visitor ID, Visit ID..."
+                        className="pl-12 h-11 bg-slate-50 border-none rounded-xl text-sm font-medium"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                    />
                 </div>
                 <div className="flex gap-2 w-full md:w-auto">
                     <div className="hidden lg:flex items-center gap-2 px-4 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-600">

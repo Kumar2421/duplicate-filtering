@@ -95,9 +95,13 @@ executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
 
 def shutdown_handler(sig, frame):
     logging.info(f"Shutdown signal {sig} received. Cleaning up...")
-    executor.shutdown(wait=False)
-    # Force exit to ensure all threads and locks are released
-    sys.exit(0)
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except Exception as e:
+        logging.error(f"Error shutting down executor: {e}")
+    # Use os._exit to bypass normal sys.exit and atexit handlers
+    # which can cause "sys.meta_path is None" or hang on thread joins
+    os._exit(0)
 
 # Register signal handlers for graceful CTRL+C and termination
 signal.signal(signal.SIGINT, shutdown_handler)
@@ -108,7 +112,8 @@ api_service = APIService(
     api_key=config["api"].get("api_key"),
     limit=config["api"].get("limit", 50),
     category=config["api"].get("category", "potential"),
-    time_range=config["api"].get("timeRange", "0,300,18000")
+    time_range=config["api"].get("timeRange", "0,300,18000"),
+    enabled=config["api"].get("enabled", True),
 )
 
 # Use one shared QdrantManager/client to avoid "Storage folder already accessed"
@@ -162,6 +167,12 @@ async def run_pipeline_sync():
     
     while True:
         try:
+            # Check if API fetching is disabled in config
+            if not config.get("api", {}).get("enabled", True):
+                logging.info("PIPELINE: API fetching is disabled in config. Skipping sync.")
+                await asyncio.sleep(interval * 60)
+                continue
+
             now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
             date_str = now_ist.strftime("%Y-%m-%d")
             
@@ -173,6 +184,11 @@ async def run_pipeline_sync():
             
             # 2. Fetch new visits from API page by page and process immediately
             pages_processed = 0
+            # Get total visits count for metadata
+            total_api_visits = 0
+            day_visits_all = await api_service.fetch_visits_for_date(branch_id, date_str)
+            total_api_visits = len(day_visits_all)
+
             async for new_visits in api_service.fetch_incremental_pages(branch_id, date_str, last_updated):
                 logging.info(f"PIPELINE: Processing {len(new_visits)} new visits for {date_str}")
                 
@@ -194,18 +210,19 @@ async def run_pipeline_sync():
                 
                 # Check if we actually have anything to cluster (points in Qdrant)
                 # This prevents empty lastUpdated updates when no ingestion happened
-                def cluster_sync(b_id, d_str, e_data):
+                def cluster_sync(b_id, d_str, e_data, t_api_v):
                     new_loop = asyncio.new_event_loop()
                     try:
                         return new_loop.run_until_complete(cluster_service.get_clusters_for_date(
                             branch_id=b_id, 
                             date=d_str, 
-                            existing_data=e_data
+                            existing_data=e_data,
+                            total_api_visits=t_api_v
                         ))
                     finally:
                         new_loop.close()
 
-                cluster_res = await loop.run_in_executor(executor, cluster_sync, branch_id, date_str, latest_manifest)
+                cluster_res = await loop.run_in_executor(executor, cluster_sync, branch_id, date_str, latest_manifest, total_api_visits)
                 
                 # Only save and increment if we actually processed something or cluster_res is valid
                 cluster_writer.save_visit_clusters(branch_id, date_str, cluster_res)
@@ -432,4 +449,7 @@ async def get_system_metrics():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8009)
+    # Use log_level="info" for visibility
+    # The signal handlers for SIGINT/SIGTERM are already registered globally in main.py
+    # so uvicorn will handle the loop stop and then our handlers will clean up the executor.
+    uvicorn.run(app, host="0.0.0.0", port=8009, log_level="info")

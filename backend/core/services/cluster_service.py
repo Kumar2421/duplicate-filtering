@@ -19,7 +19,7 @@ class ClusterService:
         self.classifier = ClusterClassifier()
         self.logger = logging.getLogger(__name__)
 
-    async def get_clusters_for_date(self, branch_id: str, date: str, existing_data: Optional[Dict[str, Any]] = None, force_reprocess: bool = False) -> Dict[str, Any]:
+    async def get_clusters_for_date(self, branch_id: str, date: str, existing_data: Optional[Dict[str, Any]] = None, force_reprocess: bool = False, total_api_visits: int = 0) -> Dict[str, Any]:
         """
         Fetch embeddings from Qdrant, build visit vectors, cluster, and classify.
         Supports incremental updates by merging with existing_data.
@@ -53,11 +53,11 @@ class ClusterService:
                 "date": date, 
                 "clusters": [], 
                 "meta": {
-                    "totalGroupsProcessed": 0,
                     "totalClusters": 0,
-                    "duplicateClusters": 0,
-                    "conflictClusters": 0,
-                    "lastUpdated": datetime.now(timezone.utc).isoformat() + 'Z',
+                    "totalVisits": 0,
+                    "totalApiVisits": total_api_visits,
+                    "balance": total_api_visits,
+                    "lastUpdated": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
                 }
             }
 
@@ -123,6 +123,7 @@ class ClusterService:
 
         # Step 5: Format for output (New Schema)
         output_clusters = []
+        unique_processed_visits = set()
         for c in classified_clusters:
             # Find existing cluster to preserve action states
             existing_cluster = next((ec for ec in existing_clusters if ec["clusterId"] == c["clusterId"]), None)
@@ -138,6 +139,7 @@ class ClusterService:
                 # Since multiple visits might have the same visitId in different event contexts,
                 # we combine visitId and eventId (if present).
                 visit_id_str = str(v.get("visitId"))
+                unique_processed_visits.add(visit_id_str)
                 event_id_str = str(v.get("eventId")) if v.get("eventId") else "primary"
                 unique_key = f"{visit_id_str}_{event_id_str}"
 
@@ -206,6 +208,9 @@ class ClusterService:
                 }
             })
 
+        total_processed_unique = len(unique_processed_visits)
+        balance = max(0, total_api_visits - total_processed_unique)
+
         return {
             "branchId": branch_id,
             "date": date,
@@ -213,6 +218,9 @@ class ClusterService:
             "meta": {
                 "totalClusters": len(output_clusters),
                 "totalVisits": sum(len(c["visits"]) for c in output_clusters),
+                "totalProcessedUnique": total_processed_unique,
+                "totalApiVisits": total_api_visits,
+                "balance": balance,
                 "lastUpdated": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             }
         }
