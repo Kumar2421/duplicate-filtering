@@ -1,36 +1,40 @@
 import React from 'react';
 import { useSystemMetrics } from '../hooks/useMetrics';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { useAppStore } from '../store/useStore';
 
 const Dashboard: React.FC = () => {
-  const { data: metrics } = useSystemMetrics();
+  const { currentBranch, dateRange } = useAppStore();
+  const { data: metrics } = useSystemMetrics(currentBranch, dateRange.startDate);
 
   // Mock stats if not available
   const stats = metrics?.stats || {
-    totalVisits: 2542,
-    totalImages: 8642,
-    uniqueCustomers: 341,
-    duplicateCases: 12,
+    totalVisits: 0,
+    totalImages: 0,
+    uniqueCustomers: 0,
+    duplicateCases: 0,
+    conflictCases: 0,
   };
 
   return (
     <div className="p-6 space-y-6">
       <h1 className="text-3xl font-bold">System Overview</h1>
-      
+
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         {[
           { label: 'Total Visits', value: stats.totalVisits },
           { label: 'Total Images', value: stats.totalImages },
           { label: 'Unique Customers', value: stats.uniqueCustomers },
-          { label: 'Duplicate Cases', value: stats.duplicateCases },
+          { label: 'Duplicate Groups', value: stats.duplicateCases, color: 'text-amber-600' },
+          { label: 'Conflict Groups', value: stats.conflictCases, color: 'text-red-600' },
         ].map((s) => (
           <Card key={s.label}>
             <CardHeader className="py-4">
               <CardTitle className="text-sm font-medium text-gray-500 uppercase tracking-wider">{s.label}</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-2xl font-bold">{s.value.toLocaleString()}</p>
+              <p className={`text-2xl font-bold ${s.color || ''}`}>{s.value.toLocaleString()}</p>
             </CardContent>
           </Card>
         ))}
@@ -50,8 +54,8 @@ const Dashboard: React.FC = () => {
             <CardContent>
               <div className="space-y-2">
                 <div className="w-full bg-gray-200 rounded-full h-2.5">
-                  <div 
-                    className="bg-blue-600 h-2.5 rounded-full transition-all duration-500" 
+                  <div
+                    className="bg-blue-600 h-2.5 rounded-full transition-all duration-500"
                     style={{ width: `${m.usage}%` }}
                   ></div>
                 </div>
@@ -68,10 +72,10 @@ const Dashboard: React.FC = () => {
           <p className="font-medium">System Processing History</p>
           <p className="text-sm">(Chart placeholder - Use static SVG/Canvas in real setup)</p>
           <div className="mt-4 w-full h-24 flex items-end gap-1 justify-center">
-            {Array.from({length: 20}).map((_, i) => (
-              <div 
-                key={i} 
-                className="w-2 bg-blue-300" 
+            {Array.from({ length: 20 }).map((_, i) => (
+              <div
+                key={i}
+                className="w-2 bg-blue-300"
                 style={{ height: `${Math.random() * 100}%` }}
               ></div>
             ))}

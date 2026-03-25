@@ -77,7 +77,7 @@ class FileManager:
             try:
                 existing = file_path.read_bytes()
                 if self._sha256(existing) == sha:
-                    self.logger.info(f"FILE_MANAGER: Identical file already exists at {file_path}")
+                    self.logger.info(f"FILE_MANAGER: Shared image collision - Identical file already exists at {file_path}")
                     return str(file_path), sha
             except Exception as e:
                 self.logger.warning(f"FILE_MANAGER: Error checking existing file: {e}")

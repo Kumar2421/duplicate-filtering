@@ -5,6 +5,7 @@ import asyncio
 import signal
 import sys
 import pytz
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Depends, Query, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,12 @@ class ConformationAction(BaseModel):
     branchId: Optional[str] = None
     date: Optional[str] = None
 
+class ConvertAction(BaseModel):
+    branchId: Optional[str] = None
+    customerId1: str
+    customerId2: str
+    toEmployee: bool
+
 from backend.services.api_service import APIService
 from backend.services.ml_service import MLService
 from backend.services.db_service import DBService
@@ -33,6 +40,7 @@ from backend.core.ml.quality_filter import QualityFilter
 from backend.core.storage.file_manager import FileManager
 from backend.core.storage.http_downloader import HttpDownloader as ImageDownloader
 from backend.utils.cluster_loader import load_clusters, get_flattened_visits, get_filtered_duplicates
+from backend.api.check_enrollment import create_check_enrollment_router
 
 # Configuration setup
 def load_config():
@@ -109,11 +117,11 @@ signal.signal(signal.SIGTERM, shutdown_handler)
 
 api_service = APIService(
     base_url=config["api"]["base_url"],
-    api_key=config["api"].get("api_key"),
     limit=config["api"].get("limit", 50),
     category=config["api"].get("category", "potential"),
     time_range=config["api"].get("timeRange", "0,300,18000"),
     enabled=config["api"].get("enabled", True),
+    configs=config["api"].get("configs", [])
 )
 
 # Use one shared QdrantManager/client to avoid "Storage folder already accessed"
@@ -155,15 +163,108 @@ ingestion_pipeline = IngestionPipeline(
 cluster_writer = JsonClusterWriter()
 cluster_service = ClusterService(qdrant_manager=qdrant_manager)
 
+app.include_router(
+    create_check_enrollment_router(
+        config=config,
+        model_manager=model_manager,
+        embedding_service=embedding_service,
+        file_manager=file_manager,
+        qdrant_manager=qdrant_manager,
+    )
+)
+
 # Add a simple background task runner for sync
+async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool):
+    """Processes a single branch: ingest new visits and update clusters."""
+    b_id = branch_cfg.get("branchId")
+    if not b_id:
+        return
+
+    logging.info(f"PIPELINE: Syncing branch {b_id} for {date_str}")
+    try:
+        # If restart is enabled, wipe existing data for this branch and date
+        if restart_enabled:
+            logging.info(f"PIPELINE: Restart enabled. Wiping ALL data for {b_id} on {date_str}")
+            # 1. Clear Qdrant points for this branch and date
+            try:
+                from qdrant_client.http import models as q_models
+                qdrant_manager.client.delete(
+                    collection_name=qdrant_manager.collection_name,
+                    points_selector=q_models.Filter(
+                        must=[
+                            q_models.FieldCondition(key="branchId", match=q_models.MatchValue(value=str(b_id))),
+                            q_models.FieldCondition(key="date", match=q_models.MatchValue(value=str(date_str))),
+                        ]
+                    )
+                )
+                await asyncio.sleep(1)
+            except Exception as q_err:
+                logging.error(f"Error wiping Qdrant for {b_id}: {q_err}")
+
+            # 2. Deep Wipe Local Directories (Processed AND Raw)
+            import shutil
+            from pathlib import Path
+            for folder in ["processed", "raw"]:
+                target_dir = Path(get_data_root()) / folder / str(b_id) / str(date_str)
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                    logging.info(f"Deep Wiped {folder} dir: {target_dir}")
+
+        # 1. Load existing cluster manifest to get lastUpdated
+        existing_data = cluster_writer.load_visit_clusters(b_id, date_str)
+        
+        last_updated = None
+        if not restart_enabled:
+            if existing_data and "meta" in existing_data:
+                last_updated = existing_data["meta"].get("lastUpdated")
+        
+        # If still no last_updated, check if branch-specific startDate exists
+        if not last_updated:
+            last_updated_str = branch_cfg.get("startDate")
+            if last_updated_str:
+                last_updated = f"{last_updated_str}T00:00:00.000Z"
+        
+        # 2. Fetch new visits from API page by page and process immediately
+        pages_processed = 0
+        day_visits_all = await api_service.fetch_visits_for_date(b_id, date_str)
+        total_api_visits = len(day_visits_all)
+
+        async for new_visits in api_service.fetch_incremental_pages(b_id, date_str, last_updated):
+            logging.info(f"PIPELINE: Processing {len(new_visits)} new visits for {b_id} on {date_str}")
+            
+            # 3. Ingest (Embeddings -> Qdrant)
+            # Use the shared executor but don't create a new event loop inside the worker
+            # The ingestion_pipeline.process_visits is an async function, so we should run it in the loop
+            ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str)
+            logging.info(f"PIPELINE: Ingestion completed for {b_id} - {ingest_res.get('metrics')} - Upserted {ingest_res.get('upserted_count', 0)} points")
+
+            # 4. Identity Resolution (Clustering)
+            latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
+            
+            cluster_res = await cluster_service.get_clusters_for_date(
+                branch_id=b_id, 
+                date=date_str, 
+                existing_data=latest_manifest,
+                total_api_visits=total_api_visits,
+                force_reprocess=restart_enabled
+            )
+            
+            cluster_writer.save_visit_clusters(b_id, date_str, cluster_res)
+            logging.info(f"PIPELINE: Clustering updated for {b_id} - {cluster_res.get('meta')}")
+            pages_processed += 1
+
+        if pages_processed == 0:
+            logging.info(f"PIPELINE: No new visits found for {b_id} on {date_str}")
+
+    except Exception as b_err:
+        logging.error(f"PIPELINE ERROR for branch {b_id}: {b_err}")
+
 async def run_pipeline_sync():
     """
     Background task that fetches new visits since lastUpdated and processes them in real-time.
+    Iterates over all branches configured in config.json in parallel.
     """
-    branch_id = config["api"].get("branchId", "TMJ-CBE")
     interval = config["api"].get("fetchInterval", 2) # Default 2 mins
-    
-    logging.info(f"PIPELINE: Starting background sync for {branch_id}")
     
     while True:
         try:
@@ -173,70 +274,37 @@ async def run_pipeline_sync():
                 await asyncio.sleep(interval * 60)
                 continue
 
+            # Get branches from config
+            api_configs = config["api"].get("configs", [])
+            if not api_configs:
+                logging.warning("PIPELINE: No branch configurations found in config.json")
+                await asyncio.sleep(interval * 60)
+                continue
+
             now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
             date_str = now_ist.strftime("%Y-%m-%d")
             
-            # 1. Load existing cluster manifest to get lastUpdated
-            existing_data = cluster_writer.load_visit_clusters(branch_id, date_str)
-            last_updated = None
-            if existing_data and "meta" in existing_data:
-                last_updated = existing_data["meta"].get("lastUpdated")
+            restart_enabled = config.get("api", {}).get("restart", False)
+
+            # Process all branches in parallel
+            tasks = [sync_branch(cfg, date_str, restart_enabled) for cfg in api_configs]
             
-            # 2. Fetch new visits from API page by page and process immediately
-            pages_processed = 0
-            # Get total visits count for metadata
-            total_api_visits = 0
-            day_visits_all = await api_service.fetch_visits_for_date(branch_id, date_str)
-            total_api_visits = len(day_visits_all)
+            # Use return_exceptions=True to prevent one branch failure from blocking others
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for i, res in enumerate(results):
+                b_id = api_configs[i].get("branchId", "Unknown")
+                if isinstance(res, Exception):
+                    logging.error(f"PIPELINE: Sync failed for branch {b_id}: {res}", exc_info=True)
+                else:
+                    logging.info(f"PIPELINE: Sync completed for branch {b_id}")
 
-            async for new_visits in api_service.fetch_incremental_pages(branch_id, date_str, last_updated):
-                logging.info(f"PIPELINE: Processing {len(new_visits)} new visits for {date_str}")
-                
-                # 3. Ingest (Embeddings -> Qdrant)
-                loop = asyncio.get_running_loop()
-                def process_sync(v_list):
-                    new_loop = asyncio.new_event_loop()
-                    try:
-                        return new_loop.run_until_complete(ingestion_pipeline.process_visits(v_list))
-                    finally:
-                        new_loop.close()
-
-                ingest_res = await loop.run_in_executor(executor, process_sync, new_visits)
-                logging.info(f"PIPELINE: Ingestion completed - {ingest_res.get('metrics')}")
-
-                # 4. Identity Resolution (Clustering)
-                # Re-load manifest each time to ensure we have the absolute latest state before updating
-                latest_manifest = cluster_writer.load_visit_clusters(branch_id, date_str)
-                
-                # Check if we actually have anything to cluster (points in Qdrant)
-                # This prevents empty lastUpdated updates when no ingestion happened
-                def cluster_sync(b_id, d_str, e_data, t_api_v):
-                    new_loop = asyncio.new_event_loop()
-                    try:
-                        return new_loop.run_until_complete(cluster_service.get_clusters_for_date(
-                            branch_id=b_id, 
-                            date=d_str, 
-                            existing_data=e_data,
-                            total_api_visits=t_api_v
-                        ))
-                    finally:
-                        new_loop.close()
-
-                cluster_res = await loop.run_in_executor(executor, cluster_sync, branch_id, date_str, latest_manifest, total_api_visits)
-                
-                # Only save and increment if we actually processed something or cluster_res is valid
-                cluster_writer.save_visit_clusters(branch_id, date_str, cluster_res)
-                logging.info(f"PIPELINE: Clustering updated - {cluster_res.get('meta')}")
-                pages_processed += 1
-
-            if pages_processed == 0:
-                # IMPORTANT: If no new visits were found, we DON'T update the manifest's lastUpdated
-                # to the current time, because we haven't actually checked any new data.
-                # The next cycle will use the same lastUpdated to check the API again.
-                logging.info(f"PIPELINE: No new visits found for {date_str}")
+            # Reset restart flag after one full cycle
+            if restart_enabled:
+                config["api"]["restart"] = False
 
         except Exception as e:
-            logging.error(f"PIPELINE ERROR: {e}", exc_info=True)
+            logging.error(f"PIPELINE GLOBAL ERROR: {e}", exc_info=True)
         
         logging.info(f"PIPELINE: Sleeping for {interval} minutes...")
         await asyncio.sleep(interval * 60)
@@ -383,6 +451,30 @@ async def get_duplicate_clusters(
         "total": len(clusters)
     }
 
+@app.get("/api/branches")
+async def get_available_branches():
+    """
+    Returns unique branch IDs that have either processed or raw data folders.
+    """
+    data_root = get_data_root()
+    branches = set()
+    
+    # Check 'processed' folder
+    proc_path = os.path.join(data_root, "processed")
+    if os.path.exists(proc_path):
+        for b in os.listdir(proc_path):
+            if os.path.isdir(os.path.join(proc_path, b)):
+                branches.add(b)
+                
+    # Check 'raw' folder
+    raw_path = os.path.join(data_root, "raw")
+    if os.path.exists(raw_path):
+        for b in os.listdir(raw_path):
+            if os.path.isdir(os.path.join(raw_path, b)):
+                branches.add(b)
+                
+    return {"branches": sorted(list(branches))}
+
 @app.get("/api/available-dates")
 async def get_available_dates(branchId: str = Query(...)):
     """
@@ -429,21 +521,86 @@ async def conformation_action(action: ConformationAction):
     
     return result
 
-@app.get("/system-metrics")
-async def get_system_metrics():
+@app.post("/api/convert")
+async def convert_action(action: ConvertAction):
     """
-    Returns mock metrics for UI consumption.
+    Proxy to external convert API.
+    """
+    branch_id = action.branchId or config["api"].get("branchId", "TMJ-CBE")
+    
+    payload = {
+        "customerId1": action.customerId1,
+        "customerId2": action.customerId2,
+        "toEmployee": action.toEmployee
+    }
+
+    result = await api_service.send_convert_action(
+        branch_id=branch_id,
+        payload=payload
+    )
+
+    if not result["success"]:
+        raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])
+    
+    return result
+
+@app.get("/system-metrics")
+async def get_system_metrics(branchId: Optional[str] = Query(None), date: Optional[str] = Query(None)):
+    """
+    Returns actual system metrics based on processed data for the given branch and date.
+    If branchId or date are not provided, it falls back to mock data or config defaults.
     """
     import random
+    
+    # Fallback to config if not provided
+    branch_id = branchId or config["api"].get("branchId", "TMJ-CBE")
+    date_str = date or datetime.now().strftime("%Y-%m-%d")
+    
+    try:
+        data = load_clusters(branch_id, date_str)
+        if data:
+            clusters = data.get("clusters", [])
+            total_visits = data.get("meta", {}).get("totalVisits", 0)
+            total_images = data.get("meta", {}).get("totalProcessedUnique", 0) # Use unique images/visits
+            unique_customers = data.get("meta", {}).get("uniqueCustomers", 0)
+            
+            # Count conflicts and duplicates
+            conflict_count = 0
+            duplicate_count = 0
+            
+            for c in clusters:
+                has_conflict = c.get("type") == "conflict" or any(v.get("conflictIds") and len(v.get("conflictIds")) > 0 for v in c.get("visits", []))
+                if has_conflict:
+                    conflict_count += 1
+                elif c.get("type") == "duplicate" or len(c.get("visits", [])) >= 2:
+                    duplicate_count += 1
+            
+            return {
+                "gpuUsage": random.randint(10, 80),
+                "cpuUsage": random.randint(20, 60),
+                "memoryUsage": random.randint(30, 70),
+                "stats": {
+                    "totalVisits": total_visits,
+                    "totalImages": total_images,
+                    "uniqueCustomers": unique_customers or len(set(cid for c in clusters for cid in c.get("customerIds", []))),
+                    "duplicateCases": duplicate_count,
+                    "conflictCases": conflict_count
+                }
+            }
+    except Exception as e:
+        logging.error(f"Error calculating system metrics: {e}")
+
+    # Fallback/Mock
     return {
         "gpuUsage": random.randint(10, 80),
         "cpuUsage": random.randint(20, 60),
         "memoryUsage": random.randint(30, 70),
         "stats": {
-            "totalVisits": random.randint(1000, 5000),
-            "totalImages": random.randint(5000, 10000),
-            "uniqueCustomers": random.randint(200, 1000),
-            "duplicateCases": random.randint(5, 50)
+            "totalVisits": 2542,
+            "totalImages": 8642,
+            "uniqueCustomers": 341,
+            "duplicateCases": 12,
+            "conflictCases": 0
         }
     }
 

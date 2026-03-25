@@ -16,9 +16,14 @@ class ModelManager:
 
     def get_app(self) -> FaceAnalysis:
         if self._app is None:
-            # Force CPU mode by setting ctx_id=-1 as requested
-            app = FaceAnalysis(name=self.model_name, providers=['CPUExecutionProvider'])
-            app.prepare(ctx_id=-1)
+            # ctx_id=0 uses GPU (CUDA), ctx_id=-1 uses CPU
+            ctx_id = get_device()
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if ctx_id == 0 else ['CPUExecutionProvider']
+            
+            app = FaceAnalysis(name=self.model_name, providers=providers)
+            app.prepare(ctx_id=ctx_id)
             self._app = app
-            self.logger.info("InsightFace model initialized on CPU")
+            
+            device_str = "GPU" if ctx_id == 0 else "CPU"
+            self.logger.info(f"InsightFace model initialized on {device_str}")
         return self._app

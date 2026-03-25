@@ -16,27 +16,23 @@ class ClusterEngine:
 
     def cluster_visits(self, visits: List[Dict[str, Any]], existing_clusters: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
-        Incremental clustering of visits based on their mean vectors.
-        Each visit in 'visits' should have a 'vector' key (np.ndarray).
-        If existing_clusters is provided, it attempts to match new visits to them first.
+        Hybrid clustering: Groups by ID (visitId/customerId) first, then by visual similarity.
+        Flags conflicts (same ID, different face) and duplicates (different ID, same face).
         """
         clusters = existing_clusters if existing_clusters is not None else []
         
-        # Convert existing centers to numpy if they aren't already (from JSON)
-        for cluster in clusters:
-            if cluster.get("center") is not None:
-                if not isinstance(cluster["center"], np.ndarray):
-                    cluster["center"] = np.array(cluster["center"])
-            elif cluster.get("visits"):
-                # Try to find a visit with a vector to use as center
-                for v in cluster["visits"]:
-                    if "vector" in v and v["vector"] is not None:
-                        cluster["center"] = np.array(v["vector"])
-                        break
-                    elif "embeddings" in v and v["embeddings"]:
-                        # Fallback if vector isn't cached but embeddings are
-                        cluster["center"] = np.mean(v["embeddings"], axis=0)
-                        break
+        # 1. Map existing IDs to clusters for immediate lookup
+        id_to_cluster_idx = {}
+        for i, cluster in enumerate(clusters):
+            # Ensure center is a numpy array
+            if cluster.get("center") is not None and not isinstance(cluster["center"], np.ndarray):
+                cluster["center"] = np.array(cluster["center"])
+            
+            for v in cluster.get("visits", []):
+                vid = v.get("visitId")
+                cid = v.get("customerId")
+                if vid: id_to_cluster_idx[str(vid)] = i
+                if cid: id_to_cluster_idx[str(cid)] = i
 
         for visit in visits:
             visit_vec = visit.get("vector")
@@ -44,44 +40,76 @@ class ClusterEngine:
                 continue
 
             assigned = False
+            target_cluster = None
             best_sim = -1.0
-            best_cluster = None
+            
+            vid = str(visit.get("visitId"))
+            cid = str(visit.get("customerId"))
 
-            for cluster in clusters:
+            # STEP 1: PRIORITY - ID MATCHING (Force group same IDs)
+            if vid in id_to_cluster_idx:
+                target_cluster = clusters[id_to_cluster_idx[vid]]
+                assigned = True
+            elif cid in id_to_cluster_idx:
+                target_cluster = clusters[id_to_cluster_idx[cid]]
+                assigned = True
+
+            # STEP 2: VISUAL MATCHING (If no ID match, or to check for face similarity in matched ID)
+            # Find best visual match regardless of whether ID was matched
+            best_visual_cluster = None
+            max_visual_sim = -1.0
+            for i, cluster in enumerate(clusters):
                 if cluster.get("center") is None:
                     continue
-                sim = cosine_similarity(visit_vec, cluster["center"])
-                if sim > self.threshold and sim > best_sim:
-                    best_sim = sim
-                    best_cluster = cluster
+                sim = float(cosine_similarity(visit_vec, cluster["center"]))
+                if sim > max_visual_sim:
+                    max_visual_sim = sim
+                    best_visual_cluster = cluster
 
-            if best_cluster:
-                # Deduplicate by visitId before adding
-                existing_vids = {v["visitId"] for v in best_cluster["visits"]}
-                if visit["visitId"] not in existing_vids:
-                    best_cluster["visits"].append(visit)
-                    # Update center: mean of all visit vectors in cluster
-                    all_vectors = []
-                    for v in best_cluster["visits"]:
-                        if "vector" in v:
-                            all_vectors.append(v["vector"])
-                        elif "embeddings" in v and v["embeddings"]:
-                            # Fallback if vector isn't cached but embeddings are
-                            all_vectors.append(np.mean(v["embeddings"], axis=0))
-                    
-                    if all_vectors:
-                        best_cluster["center"] = np.mean(all_vectors, axis=0)
-                
-                visit["similarityScore"] = best_sim
+            # If not assigned by ID, try assigning by visual similarity
+            if not assigned and max_visual_sim > self.threshold:
+                target_cluster = best_visual_cluster
                 assigned = True
-            
-            if not assigned:
-                clusters.append({
+                best_sim = max_visual_sim
+                # Flag as DUPLICATE if it's a different ID but same face
+                visit["duplicate"] = "multiple_ids"
+            elif assigned:
+                # If assigned by ID, calculate similarity to its own cluster center for metadata
+                if target_cluster and target_cluster.get("center") is not None:
+                    best_sim = float(cosine_similarity(visit_vec, target_cluster["center"]))
+                
+                # Flag as CONFLICT if it's the same ID but face is different
+                if best_sim < self.threshold:
+                    visit["conflict"] = "different_face"
+
+            # STEP 3: UPDATE OR CREATE
+            if assigned and target_cluster:
+                existing_vids = {str(v["visitId"]) for v in target_cluster["visits"]}
+                if vid not in existing_vids:
+                    target_cluster["visits"].append(visit)
+                    
+                    # Update ID maps
+                    idx = clusters.index(target_cluster)
+                    id_to_cluster_idx[vid] = idx
+                    if cid: id_to_cluster_idx[cid] = idx
+
+                    # Update center
+                    all_vectors = [np.array(v["vector"]) for v in target_cluster["visits"] if "vector" in v]
+                    if all_vectors:
+                        target_cluster["center"] = np.mean(all_vectors, axis=0)
+                
+                visit["similarityScore"] = best_sim if best_sim != -1.0 else 1.0
+            else:
+                new_cluster = {
                     "clusterId": f"cluster_{uuid.uuid4().hex[:8]}",
                     "visits": [visit],
                     "center": visit_vec,
                     "type": "valid"
-                })
+                }
+                clusters.append(new_cluster)
+                idx = len(clusters) - 1
+                id_to_cluster_idx[vid] = idx
+                if cid: id_to_cluster_idx[cid] = idx
                 visit["similarityScore"] = 1.0
 
         return clusters

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dataclasses import dataclass
 
 
@@ -12,7 +13,10 @@ class Settings:
     SIM_THRESHOLD: float = float(os.getenv("SIM_THRESHOLD", "0.5"))
     PRIMARY_MATCH_THRESHOLD: float = float(os.getenv("PRIMARY_MATCH_THRESHOLD", "0.5"))
     STRICT_MATCH_THRESHOLD: float = float(os.getenv("STRICT_MATCH_THRESHOLD", "0.75"))
-    STORAGE_PATH: str = os.getenv("STORAGE_PATH", "./data/raw")
+    STORAGE_PATH: str = os.getenv(
+        "STORAGE_PATH",
+        str(Path(__file__).resolve().parents[3] / "data" / "raw"),
+    )
     CACHE_PATH: str = os.getenv("CACHE_PATH", "./data/cache")
     LOGS_PATH: str = os.getenv("LOGS_PATH", "./data/logs")
 

@@ -30,27 +30,38 @@ class QdrantManager:
         try:
             collections = self.client.get_collections().collections
             exists = any(c.name == self.collection_name for c in collections)
-            if exists:
-                return
+            if not exists:
+                distance = models.Distance.COSINE
+                if str(settings.QDRANT_DISTANCE).upper() == "DOT":
+                    distance = models.Distance.DOT
+                elif str(settings.QDRANT_DISTANCE).upper() == "EUCLID":
+                    distance = models.Distance.EUCLID
 
-            distance = models.Distance.COSINE
-            if str(settings.QDRANT_DISTANCE).upper() == "DOT":
-                distance = models.Distance.DOT
-            elif str(settings.QDRANT_DISTANCE).upper() == "EUCLID":
-                distance = models.Distance.EUCLID
+                self.client.recreate_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=models.VectorParams(size=self.vector_size, distance=distance),
+                )
+                self.logger.info(f"Qdrant collection created: {self.collection_name}")
 
-            self.client.recreate_collection(
+            # Ensure Payload Indexes for branchId and date for fast filtering
+            self.client.create_payload_index(
                 collection_name=self.collection_name,
-                vectors_config=models.VectorParams(size=self.vector_size, distance=distance),
+                field_name="branchId",
+                field_schema=models.PayloadSchemaType.KEYWORD,
             )
-            self.logger.info(f"Qdrant collection created: {self.collection_name}")
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="date",
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+            self.logger.info(f"Qdrant payload indexes ensured for branchId and date")
         except Exception as e:
-            self.logger.error(f"Error ensuring Qdrant collection: {e}")
+            self.logger.error(f"Error ensuring Qdrant collection or indexes: {e}")
             raise
 
-    def event_exists(self, event_id: str) -> bool:
+    def event_exists(self, event_id: str, branch_id: str, date: str) -> bool:
         """
-        Checks if a specific eventId (watermark) already exists in the collection.
+        Checks if a specific eventId (watermark) already exists for this branch and date.
         """
         if not event_id:
             return False
@@ -60,6 +71,8 @@ class QdrantManager:
                 scroll_filter=models.Filter(
                     must=[
                         models.FieldCondition(key="eventId", match=models.MatchValue(value=str(event_id))),
+                        models.FieldCondition(key="branchId", match=models.MatchValue(value=str(branch_id))),
+                        models.FieldCondition(key="date", match=models.MatchValue(value=str(date))),
                     ]
                 ),
                 limit=1,
@@ -126,9 +139,12 @@ class QdrantManager:
         return total
 
 
-def make_point_id(visit_id: str, event_id: Optional[str], image_type: str, ts_ms: Optional[int] = None) -> str:
-    ts_ms = int(ts_ms or (time.time() * 1000))
+def make_point_id(visit_id: str, branch_id: str, date: str, event_id: Optional[str] = None, image_type: str = "primary") -> str:
+    """
+    Creates a deterministic UUID from the combined branch, date, visit, and event context.
+    This prevents cross-branch or cross-date ID collisions in Qdrant.
+    """
     eid = event_id if event_id is not None else "primary"
-    # Create a deterministic UUID from the combined string to satisfy Qdrant's requirement
-    seed = f"{visit_id}:{image_type}:{eid}"
+    # Seed contains full context to ensure uniqueness across branches and dates
+    seed = f"{branch_id}:{date}:{visit_id}:{image_type}:{eid}"
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))

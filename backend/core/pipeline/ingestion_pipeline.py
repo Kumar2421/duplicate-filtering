@@ -116,10 +116,11 @@ class IngestionPipeline:
                 payload.update(extra_payload)
 
             pid = make_point_id(
-                visit_id=point_visit_id or str(visit_ctx["visitId"]),
+                visit_id=str(visit_ctx["visitId"]),
+                branch_id=str(visit_ctx["branchId"]),
+                date=str(visit_ctx["date"]),
                 event_id=payload.get("eventId"),
-                image_type=str(payload.get("imageType")),
-                ts_ms=int(time.time() * 1000)
+                image_type=str(payload.get("imageType"))
             )
 
             vec = np.array(result.embedding, dtype=np.float32)
@@ -137,7 +138,7 @@ class IngestionPipeline:
             self.logger.error(f"Error processing image: {e}\n{traceback.format_exc()}")
             return None
 
-    async def process_visits(self, visits: Iterable[Dict[str, Any]], force_reprocess: bool = False) -> Dict[str, Any]:
+    async def process_visits(self, visits: Iterable[Dict[str, Any]], force_reprocess: bool = False, target_date: Optional[str] = None) -> Dict[str, Any]:
         metrics = PipelineMetrics()
         points_to_store: List[EmbeddingPoint] = []
 
@@ -153,13 +154,19 @@ class IngestionPipeline:
             try:
                 visit_ctx = normalize_visit(raw_visit)
                 
+                # STRICT DATE FILTERING: Skip visits that don't match the requested sync date
+                if target_date and str(visit_ctx.get("date")) != str(target_date):
+                    self.logger.warning(f"INGESTION: Skipping visit {visit_ctx['visitId']} from {visit_ctx['date']} (Requested: {target_date})")
+                    continue
+
                 # Check Layer 2: Qdrant existence
+                # MODIFICATION: If force_reprocess is True, we skip the existence check entirely
                 if not force_reprocess and self.qdrant.visit_exists(
                     str(visit_ctx["branchId"]),
                     str(visit_ctx["date"]),
                     str(visit_ctx["visitId"])
                 ):
-                    self.logger.info(f"INGESTION: Skipping existing visit {visit_ctx['visitId']}")
+                    self.logger.info(f"INGESTION: Skipping existing visit {visit_ctx['visitId']} for {visit_ctx['branchId']} on {visit_ctx['date']}")
                     continue
 
                 metrics.total_visits_processed += 1
@@ -176,13 +183,18 @@ class IngestionPipeline:
                 for img in images:
                     event_file_id = str(img.eventId) if img.eventId else "primary"
                     
-                    # WATERMARK CHECK: Skip if eventId already exists in Qdrant
-                    if img.eventId and self.qdrant.event_exists(img.eventId):
-                        self.logger.info(f"INGESTION: Skipping already processed eventId {img.eventId}")
+                    # WATERMARK CHECK: Skip if eventId already exists in Qdrant for this specific branch/date
+                    if not force_reprocess and img.eventId and self.qdrant.event_exists(
+                        img.eventId, 
+                        str(visit_ctx["branchId"]), 
+                        str(visit_ctx["date"])
+                    ):
+                        self.logger.info(f"INGESTION: Skipping already processed eventId {img.eventId} for {visit_ctx['branchId']} on {visit_ctx['date']}")
                         continue
 
                     # Check if we already have the original image on disk
-                    if not self.file_manager.has_original(
+                    # MODIFICATION: If force_reprocess is True, we ignore the disk check and force re-download
+                    if force_reprocess or not self.file_manager.has_original(
                         str(visit_ctx["branchId"]), 
                         str(visit_ctx["date"]), 
                         str(visit_ctx["visitId"]), 
@@ -307,5 +319,6 @@ class IngestionPipeline:
             stored = self.qdrant.upsert_in_batches(points_to_store, batch_size=int(settings.BATCH_SIZE))
             metrics.total_embeddings_stored = stored
             self.logger.info(f"Upserted {stored} points")
+            return {"metrics": metrics.to_dict(), "upserted_count": stored}
 
-        return {"metrics": metrics.to_dict()}
+        return {"metrics": metrics.to_dict(), "upserted_count": 0}

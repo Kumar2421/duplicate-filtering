@@ -1,0 +1,16 @@
+[
+  {
+    "clusterId": "cluster_a5ee4571",
+    "eventId": "f6c845c1-c87d-4bc0-a2a3-c16d426743d8-3242026-124854PM",
+    "approve": true,
+    "status": "failed",
+    "timestamp": "2026-03-24T16:52:35.049562"
+  },
+  {
+    "clusterId": "cluster_b01f2b97",
+    "eventId": "db65ac31-280a-4a88-8047-c7166175e5fc-3242026-94631AM",
+    "approve": true,
+    "status": "failed",
+    "timestamp": "2026-03-24T16:55:13.447175"
+  }
+]

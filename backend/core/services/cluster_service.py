@@ -11,6 +11,7 @@ from ..db.qdrant_manager import QdrantManager
 from ..clustering.cluster_engine import ClusterEngine
 from ..clustering.classifier import ClusterClassifier
 from ..config.settings import settings
+from backend.utils.cluster_loader import get_data_root
 
 class ClusterService:
     def __init__(self, qdrant_manager: QdrantManager):
@@ -48,13 +49,14 @@ class ClusterService:
 
         if not points:
             self.logger.warning(f"No points found in Qdrant for branchId={branch_id} and date={date}")
-            return existing_data or {
+            return {
                 "branchId": branch_id, 
                 "date": date, 
                 "clusters": [], 
                 "meta": {
                     "totalClusters": 0,
                     "totalVisits": 0,
+                    "totalProcessedUnique": 0,
                     "totalApiVisits": total_api_visits,
                     "balance": total_api_visits,
                     "lastUpdated": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
@@ -77,11 +79,11 @@ class ClusterService:
                 "date": date,
                 "clusters": [],
                 "meta": {
-                    "totalGroupsProcessed": 0,
                     "totalClusters": 0,
-                    "duplicateClusters": 0,
-                    "conflictClusters": 0,
-                    "lastUpdated": datetime.now(timezone.utc).isoformat() + 'Z',
+                    "totalVisits": 0,
+                    "totalApiVisits": total_api_visits,
+                    "balance": total_api_visits,
+                    "lastUpdated": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
                 },
             }
 
@@ -159,15 +161,23 @@ class ClusterService:
 
                     # Scan the visit folder for ALL available images
                     # Path: data/raw/{branchId}/{date}/{visitId}/
-                    visit_dir = Path(settings.STORAGE_PATH) / str(branch_id_v) / str(date_v) / str(visit_id_v)
+                    visit_dir = Path(get_data_root()) / "raw" / str(branch_id_v) / str(date_v) / str(visit_id_v)
                     if visit_dir.exists():
                         for f in visit_dir.iterdir():
                             if f.is_file() and f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]:
                                 is_primary = (f.name == "primary.jpg")
+                                
+                                # Extract eventId from filename if possible
+                                # Filenames are usually {eventId}.jpg or primary.jpg
+                                event_id = None
+                                if not is_primary:
+                                    event_id = f.stem # name without extension
+                                
                                 all_images.append({
                                     "url": f"/images/{branch_id_v}/{date_v}/{visit_id_v}/{f.name}",
                                     "name": f.name,
-                                    "isPrimary": is_primary
+                                    "isPrimary": is_primary,
+                                    "eventId": event_id
                                 })
                         
                         # Sort to put primary image first

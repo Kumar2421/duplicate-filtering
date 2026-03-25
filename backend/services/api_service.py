@@ -12,21 +12,27 @@ class APIService:
     def __init__(
         self,
         base_url: str,
-        api_key: str = None,
         limit: int = 50,
         category: str = "potential",
         time_range: str = "0,300,18000",
         enabled: bool = True,
+        configs: List[Dict[str, Any]] = None
     ):
         self.base_url = base_url
-        self.api_key = api_key
         self.limit = limit
         self.category = category
         self.time_range = time_range
         self.enabled = enabled
+        self.configs = configs or []
         self.logger = logging.getLogger(__name__)
         self.state_dir = "data/state"
         os.makedirs(self.state_dir, exist_ok=True)
+
+    def _get_api_key_for_branch(self, branch_id: str) -> Optional[str]:
+        for cfg in self.configs:
+            if cfg.get("branchId") == branch_id:
+                return cfg.get("api_key")
+        return None
 
     def _get_state_file(self, branch_id: str, date_str: str) -> str:
         return os.path.join(self.state_dir, f"seen_visits_{branch_id}_{date_str}.json")
@@ -79,10 +85,10 @@ class APIService:
         }
         
         headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-            # Keep x-api-key as fallback if needed, but 401 often means Bearer is expected for JWTs
-            headers["x-api-key"] = self.api_key
+        api_key = self._get_api_key_for_branch(branch_id)
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["x-api-key"] = api_key
 
         for attempt in range(retries):
             try:
@@ -151,6 +157,26 @@ class APIService:
             if not visits:
                 break
 
+            # OPTIMIZATION: If we are on page 0 and have a last_ts, check the first visit.
+            # If the most recent visit is already older than or equal to last_ts,
+            # we can stop immediately because the API returns visits sorted newest first.
+            if page == 0 and last_ts:
+                first_v = visits[0]
+                v_updated_at = first_v.get("updatedAt")
+                if v_updated_at:
+                    try:
+                        v_ts = datetime.fromisoformat(v_updated_at.replace('Z', '+00:00'))
+                        if v_ts.tzinfo is None:
+                            v_ts = v_ts.replace(tzinfo=timezone.utc)
+                        else:
+                            v_ts = v_ts.astimezone(timezone.utc)
+                        
+                        if v_ts <= last_ts:
+                            self.logger.info(f"API_WATCH: No new data since {last_updated}. Skipping scan.")
+                            break
+                    except Exception as e:
+                        self.logger.error(f"Error parsing first visit updatedAt: {e}")
+
             new_in_page = []
             reached_old_data = False
             
@@ -199,8 +225,9 @@ class APIService:
             "approve": bool(action_data["approve"])
         }
 
+        api_key = self._get_api_key_for_branch(branch_id)
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}" if api_key else "",
             "Content-Type": "application/json",
             "accept": "application/json, text/plain, */*"
         }
@@ -226,6 +253,33 @@ class APIService:
             return {"success": False, "error": str(e)}
 
         return {"success": False, "error": "Unknown error in proxy pipeline"}
+
+    async def send_convert_action(self, branch_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Proxy call to v3 convert API.
+        """
+        api_url = "https://api.analytics.thefusionapps.com/api/v3/convert"
+        
+        api_key = self._get_api_key_for_branch(branch_id)
+        headers = {
+            "Authorization": f"Bearer {api_key}" if api_key else "",
+            "Content-Type": "application/json",
+            "accept": "application/json, text/plain, */*"
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.post(api_url, json=payload, headers=headers, timeout=30.0)
+                
+                return {
+                    "success": res.status_code in [200, 201],
+                    "status_code": res.status_code,
+                    "response": res.json() if res.content else None,
+                    "error": None if res.is_success else res.text[:500]
+                }
+        except Exception as e:
+            self.logger.error(f"Error in send_convert_action: {str(e)}")
+            return {"success": False, "error": str(e)}
 
     def _log_action_locally(self, branch_id: str, date: str, payload: Dict[str, Any], result: Dict[str, Any]):
         """

@@ -151,21 +151,14 @@ const Visits: React.FC = () => {
                                                 currentName: img.name,
                                                 isPrimary: img.isPrimary
                                             })}
-                                            className="group relative aspect-[3/4] rounded-xl overflow-hidden bg-white border border-slate-100 shadow-sm transition-all hover:ring-2 hover:ring-blue-500 hover:shadow-xl cursor-pointer"
+                                            className="group relative aspect-[3/4] rounded-xl overflow-hidden bg-white border border-slate-100 shadow-sm transition-all cursor-pointer"
                                         >
                                             <img
                                                 src={img.url.startsWith('/') ? `${BASE_URL}${img.url}` : img.url}
-                                                className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                                                className="w-full h-full object-cover"
                                                 onError={(e: any) => e.target.src = 'https://placehold.co/300x400?text=No+Photo'}
                                                 loading="lazy"
                                             />
-
-                                            {/* Hover Overlay */}
-                                            <div className="absolute inset-0 bg-slate-900/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pb-3 backdrop-blur-[1px]">
-                                                <p className="text-[8px] font-bold text-blue-300 uppercase tracking-tighter truncate">{img.name}</p>
-                                                <p className="text-[9px] font-black text-white leading-tight">Visit #{visit.visitId}</p>
-                                                <p className="text-[8px] font-bold text-slate-300 mt-1">{visit.time}</p>
-                                            </div>
 
                                             {/* Primary Badge */}
                                             {img.isPrimary && (
