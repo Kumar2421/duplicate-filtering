@@ -18,26 +18,18 @@ from datetime import datetime, timedelta
 import numpy as np
 import httpx
 
-class DeleteEventRequest(BaseModel):
-    branchId: Optional[str] = None
-    visitId: str
-    eventId: str
-    api_key: Optional[str] = None
-
 class ConformationAction(BaseModel):
     id: str
     eventId: str
     approve: bool
     branchId: Optional[str] = None
     date: Optional[str] = None
-    api_key: Optional[str] = None
 
 class ConvertAction(BaseModel):
     branchId: Optional[str] = None
     customerId1: str
     customerId2: str
     toEmployee: bool
-    api_key: Optional[str] = None
 
 class CompareFacesRequest(BaseModel):
     image1: str
@@ -406,7 +398,7 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool):
             # 3. Ingest (Embeddings -> Qdrant)
             # Use the shared executor but don't create a new event loop inside the worker
             # The ingestion_pipeline.process_visits is an async function, so we should run it in the loop
-            ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id)
+            ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str)
             logging.info(f"PIPELINE: Ingestion completed for {b_id} - {ingest_res.get('metrics')} - Upserted {ingest_res.get('upserted_count', 0)} points")
 
             # 4. Identity Resolution (Clustering)
@@ -720,8 +712,7 @@ async def conformation_action(action: ConformationAction):
     result = await api_service.send_conformation_action(
         branch_id=branch_id,
         date=date,
-        action_data=action.dict(),
-        api_key_override=action.api_key
+        action_data=action.dict()
     )
 
     if not result["success"]:
@@ -736,53 +727,16 @@ async def convert_action(action: ConvertAction):
     """
     branch_id = action.branchId or config["api"].get("branchId", "TMJ-CBE")
     
-    print(f"DEBUG: Convert action for branch {branch_id}")
-    print(f"DEBUG: Payload: {action.dict()}")
-    
     payload = {
         "customerId1": action.customerId1,
         "customerId2": action.customerId2,
         "toEmployee": action.toEmployee
     }
 
-    try:
-        print(f"DEBUG: Calling api_service.send_convert_action with branch_id={branch_id}")
-        result = await api_service.send_convert_action(
-            branch_id=branch_id,
-            payload=payload,
-            api_key_override=action.api_key
-        )
-        print(f"DEBUG: api_service.send_convert_action result: {result}")
-    except Exception as e:
-        print(f"ERROR in convert_action: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-
-    if not result["success"]:
-        raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])
-    
-    return result
-
-@app.delete("/api/delete-event")
-async def delete_event(action: DeleteEventRequest):
-    """
-    Proxy to external delete event API.
-    """
-    branch_id = action.branchId or config["api"].get("branchId", "TMJ-CBE")
-    
-    try:
-        result = await api_service.send_delete_event(
-            branch_id=branch_id,
-            visit_id=action.visitId,
-            event_id=action.eventId,
-            api_key_override=action.api_key
-        )
-    except Exception as e:
-        print(f"ERROR in delete_event: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+    result = await api_service.send_convert_action(
+        branch_id=branch_id,
+        payload=payload
+    )
 
     if not result["success"]:
         raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])

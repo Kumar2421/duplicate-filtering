@@ -62,6 +62,7 @@ class APIService:
         page: int,
         time_range: Optional[str] = None,
         retries: int = 3,
+        api_key_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Fetch a single page for a specific date with retry logic.
@@ -85,7 +86,7 @@ class APIService:
         }
         
         headers = {}
-        api_key = self._get_api_key_for_branch(branch_id)
+        api_key = api_key_override or self._get_api_key_for_branch(branch_id)
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
             headers["x-api-key"] = api_key
@@ -106,7 +107,7 @@ class APIService:
         
         return {}
 
-    async def fetch_visits_for_date(self, branch_id: str, date: str, time_range: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def fetch_visits_for_date(self, branch_id: str, date: str, time_range: Optional[str] = None, api_key_override: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Loops through all pages for a single date.
         """
@@ -114,7 +115,7 @@ class APIService:
         page = 0
         
         while True:
-            data = await self.fetch_page(branch_id, date, page, time_range=time_range)
+            data = await self.fetch_page(branch_id, date, page, time_range=time_range, api_key_override=api_key_override)
             visits = data.get("visits", [])
             
             if not visits:
@@ -131,7 +132,7 @@ class APIService:
             
         return all_visits
 
-    async def fetch_incremental_pages(self, branch_id: str, date: str, last_updated: Optional[str] = None) -> AsyncGenerator[List[Dict[str, Any]], None]:
+    async def fetch_incremental_pages(self, branch_id: str, date: str, last_updated: Optional[str] = None, api_key_override: Optional[str] = None) -> AsyncGenerator[List[Dict[str, Any]], None]:
         """
         Polls the API page by page. 
         Yields a page only if it contains visits newer than last_updated.
@@ -152,7 +153,7 @@ class APIService:
                 last_ts = None
 
         while True:
-            data = await self.fetch_page(branch_id, date, page)
+            data = await self.fetch_page(branch_id, date, page, api_key_override=api_key_override)
             visits = data.get("visits", [])
             if not visits:
                 break
@@ -212,12 +213,12 @@ class APIService:
             
             page += 1
 
-    async def send_conformation_action(self, branch_id: str, date: str, action_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def send_conformation_action(self, branch_id: str, date: str, action_data: Dict[str, Any], api_key_override: Optional[str] = None) -> Dict[str, Any]:
         """
         Proxy call to v3 conformation/action API.
         Saves local log of actions sent.
         """
-        api_url = "https://api.analytics.thefusionapps.com/api/v3/conformation/action"
+        api_url = "https://api.analytics.thefusionapps.com/api/v3/conformation/action/"
         
         payload = {
             "id": str(action_data["id"]), # clusterId -> conformation_id
@@ -225,16 +226,24 @@ class APIService:
             "approve": bool(action_data["approve"])
         }
 
-        api_key = self._get_api_key_for_branch(branch_id)
+        api_key = api_key_override or self._get_api_key_for_branch(branch_id)
         headers = {
             "Authorization": f"Bearer {api_key}" if api_key else "",
             "Content-Type": "application/json",
-            "accept": "application/json, text/plain, */*"
+            "accept": "application/json, text/plain, */*",
+            "referer": "https://analytics.develop.thefusionapps.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+            "dnt": "1",
+            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"'
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                res = await client.put(api_url, json=payload, headers=headers, timeout=30.0)
+            timeout = httpx.Timeout(120.0, connect=30.0)
+            async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+                json_payload = json.dumps(payload)
+                res = await client.put(api_url, content=json_payload, headers=headers)
                 
                 result = {
                     "success": res.status_code in [200, 201],
@@ -254,31 +263,119 @@ class APIService:
 
         return {"success": False, "error": "Unknown error in proxy pipeline"}
 
-    async def send_convert_action(self, branch_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def send_convert_action(self, branch_id: str, payload: Dict[str, Any], api_key_override: Optional[str] = None) -> Dict[str, Any]:
         """
         Proxy call to v3 convert API.
         """
-        api_url = "https://api.analytics.thefusionapps.com/api/v3/convert"
+        api_url = "https://api.analytics.thefusionapps.com/api/v3/convert/"
         
-        api_key = self._get_api_key_for_branch(branch_id)
+        api_key = api_key_override or self._get_api_key_for_branch(branch_id)
         headers = {
             "Authorization": f"Bearer {api_key}" if api_key else "",
             "Content-Type": "application/json",
-            "accept": "application/json, text/plain, */*"
+            "accept": "application/json, text/plain, */*",
+            "referer": "https://analytics.develop.thefusionapps.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+            "dnt": "1",
+            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"'
+        }
+
+        # The external API confirmed it uses 'toEmployee'
+        external_payload = {
+            "customerId1": str(payload["customerId1"]),
+            "customerId2": str(payload["customerId2"]),
+            "toEmployee": bool(payload["toEmployee"])
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                res = await client.post(api_url, json=payload, headers=headers, timeout=30.0)
+            # Reverting back to standard JSON post since text/plain was likely not the cause of 400
+            timeout = httpx.Timeout(120.0, connect=30.0)
+            async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+                res = await client.post(api_url, json=external_payload, headers=headers)
                 
-                return {
+                # Safer response handling to avoid 'Expecting value: line 1 column 1' JSON error
+                response_data = None
+                if res.content:
+                    try:
+                        response_data = res.json()
+                    except Exception:
+                        response_data = res.text[:1000] # Fallback to text if not JSON
+
+                result = {
                     "success": res.status_code in [200, 201],
                     "status_code": res.status_code,
-                    "response": res.json() if res.content else None,
-                    "error": None if res.is_success else res.text[:500]
+                    "response": response_data,
+                    "error": None if res.is_success else (res.text[:500] if res.text else f"HTTP {res.status_code}")
                 }
+                
+                if not result["success"]:
+                    self.logger.error(f"External API Error (Convert): Status={res.status_code}, Body={res.text[:500] if res.text else 'Empty'}")
+                
+                return result
         except Exception as e:
             self.logger.error(f"Error in send_convert_action: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return {"success": False, "error": str(e)}
+
+    async def send_delete_event(self, branch_id: str, visit_id: str, event_id: str, api_key_override: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Proxy call to v2 retail delete event API.
+        URL: https://api.analytics.thefusionapps.com/api/v2/retail/delete/event/{visitId}/{eventId}
+        Method: POST (as per user observation)
+        """
+        api_url = f"https://api.analytics.thefusionapps.com/api/v2/retail/delete/event/{visit_id}/{event_id}"
+        
+        api_key = api_key_override or self._get_api_key_for_branch(branch_id)
+        headers = {
+            "Authorization": f"Bearer {api_key}" if api_key else "",
+            "Content-Type": "application/json",
+            "accept": "application/json, text/plain, */*",
+            "referer": "https://analytics.develop.thefusionapps.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+            "dnt": "1",
+            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "origin": "https://analytics.develop.thefusionapps.com",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+            "x-cache-bypass": "true"
+        }
+
+        try:
+            timeout = httpx.Timeout(120.0, connect=30.0)
+            async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+                # User confirmed Method: POST with Content-Length: 0
+                res = await client.post(api_url, headers=headers)
+                
+                # Safer response handling
+                response_data = None
+                if res.content:
+                    try:
+                        response_data = res.json()
+                    except Exception:
+                        response_data = res.text[:1000]
+
+                result = {
+                    "success": res.status_code in [200, 201, 204],
+                    "status_code": res.status_code,
+                    "response": response_data,
+                    "error": None if res.is_success else (res.text[:500] if res.text else f"HTTP {res.status_code}")
+                }
+                
+                if not result["success"]:
+                    self.logger.error(f"External API Error (Delete Event): Status={res.status_code}, Body={res.text[:500] if res.text else 'Empty'}")
+                
+                return result
+
+        except Exception as e:
+            self.logger.error(f"Error in send_delete_event: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return {"success": False, "error": str(e)}
 
     def _log_action_locally(self, branch_id: str, date: str, payload: Dict[str, Any], result: Dict[str, Any]):

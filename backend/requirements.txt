@@ -7,3 +7,5 @@ opencv-python
 httpx
 pydantic
 numpy
+
+deepface==0.0.99

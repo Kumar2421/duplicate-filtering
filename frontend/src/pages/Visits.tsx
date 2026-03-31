@@ -1,31 +1,26 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
-import { fetchAllVisits, BASE_URL } from '../services/api';
+import { fetchAllVisits, fetchAvailableDates, BASE_URL } from '../services/api';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
 import { Search, MapPin, RefreshCw, ImageIcon, X, AlertCircle } from 'lucide-react';
 import { DateSelector } from '../components/DateSelector';
 
 const Visits: React.FC = () => {
-    const { currentBranch, dateRange } = useAppStore();
+    const { currentBranch, dateRange, setDateRange } = useAppStore();
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedItem, setSelectedItem] = useState<any>(null);
+
+    const { data: availableDatesData } = useQuery({
+        queryKey: ['available-dates', currentBranch],
+        queryFn: () => fetchAvailableDates(currentBranch),
+    });
 
     const { data, isLoading, error, refetch } = useQuery({
         queryKey: ['visits', currentBranch, dateRange.startDate],
         queryFn: () => fetchAllVisits(currentBranch, dateRange.startDate),
     });
-
-    if (error) {
-        return (
-            <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-                <AlertCircle className="w-12 h-12 text-red-500" />
-                <h2 className="text-xl font-bold text-slate-800">Connection Failed</h2>
-                <Button onClick={() => refetch()} variant="outline">Retry Sync</Button>
-            </div>
-        );
-    }
 
     const flattenedVisits = useMemo(() => {
         if (!data?.clusters) return [];
@@ -49,6 +44,25 @@ const Visits: React.FC = () => {
 
         return visits;
     }, [data, searchQuery]);
+
+    useEffect(() => {
+        if (availableDatesData?.dates?.length > 0) {
+            const latestDate = availableDatesData.dates[0];
+            if (dateRange.startDate !== latestDate && !availableDatesData.dates.includes(dateRange.startDate)) {
+                setDateRange({ startDate: latestDate, endDate: latestDate });
+            }
+        }
+    }, [availableDatesData, currentBranch, setDateRange]);
+
+    if (error) {
+        return (
+            <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
+                <AlertCircle className="w-12 h-12 text-red-500" />
+                <h2 className="text-xl font-bold text-slate-800">Connection Failed</h2>
+                <Button onClick={() => refetch()} variant="outline">Retry Sync</Button>
+            </div>
+        );
+    }
 
     const stats = {
         totalImages: flattenedVisits?.reduce((acc: number, v: any) => acc + (v.allImages?.length || 1), 0) || 0,

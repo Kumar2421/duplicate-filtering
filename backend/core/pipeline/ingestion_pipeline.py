@@ -138,7 +138,7 @@ class IngestionPipeline:
             self.logger.error(f"Error processing image: {e}\n{traceback.format_exc()}")
             return None
 
-    async def process_visits(self, visits: Iterable[Dict[str, Any]], force_reprocess: bool = False, target_date: Optional[str] = None) -> Dict[str, Any]:
+    async def process_visits(self, visits: Iterable[Dict[str, Any]], force_reprocess: bool = False, target_date: Optional[str] = None, target_branch_id: Optional[str] = None) -> Dict[str, Any]:
         metrics = PipelineMetrics()
         points_to_store: List[EmbeddingPoint] = []
 
@@ -153,6 +153,10 @@ class IngestionPipeline:
 
             try:
                 visit_ctx = normalize_visit(raw_visit)
+                
+                # Override branchId if target_branch_id is provided
+                if target_branch_id:
+                    visit_ctx["branchId"] = str(target_branch_id)
                 
                 # STRICT DATE FILTERING: Skip visits that don't match the requested sync date
                 if target_date and str(visit_ctx.get("date")) != str(target_date):

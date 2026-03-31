@@ -1,10 +1,9 @@
-import React from 'react';
+import React, { useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
-import { fetchDuplicateClusters, BASE_URL } from '../services/api';
+import { fetchDuplicateClusters, fetchAvailableDates, sendConvertAction, deleteEvent, BASE_URL } from '../services/api';
 import { Button } from '../components/ui/button';
 import { Search, MapPin, Check, X, RefreshCw, AlertCircle, Layers, Code, Copy, AlertTriangle } from 'lucide-react';
-import { sendConformationAction, sendConvertAction } from '../services/api';
 import { toast } from 'sonner';
 import { Input } from '../components/ui/input';
 import { DateSelector } from '../components/DateSelector';
@@ -20,18 +19,33 @@ import { Checkbox } from "../components/ui/checkbox";
 import { Label } from "../components/ui/label";
 
 const Duplicates: React.FC = () => {
-  const { currentBranch, dateRange } = useAppStore();
+  const { currentBranch, dateRange, setDateRange } = useAppStore();
   const [searchQuery, setSearchQuery] = React.useState('');
   const [showSidebar, setShowSidebar] = React.useState(true);
   const [selectedCluster, setSelectedCluster] = React.useState<any>(null);
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   const [toEmployee, setToEmployee] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [apiKey, setApiKey] = React.useState('');
+
+  const { data: availableDatesData } = useQuery({
+    queryKey: ['available-dates', currentBranch],
+    queryFn: () => fetchAvailableDates(currentBranch),
+  });
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['duplicate-clusters', currentBranch, dateRange.startDate],
     queryFn: () => fetchDuplicateClusters(currentBranch, dateRange.startDate),
   });
+
+  useEffect(() => {
+    if (availableDatesData?.dates?.length > 0) {
+      const latestDate = availableDatesData.dates[0];
+      if (dateRange.startDate !== latestDate && !availableDatesData.dates.includes(dateRange.startDate)) {
+        setDateRange({ startDate: latestDate, endDate: latestDate });
+      }
+    }
+  }, [availableDatesData, currentBranch, setDateRange]);
 
   const handleIdToggle = (id: string) => {
     setSelectedIds(prev => {
@@ -52,13 +66,23 @@ const Duplicates: React.FC = () => {
       return;
     }
 
+    const selectedVisits = selectedCluster?.visits?.filter((v: any) =>
+      selectedIds.includes(v.customerId)
+    ) || [];
+
+    if (selectedVisits.length === 0) {
+      toast.error("Could not find visit data for selected IDs");
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       const result = await sendConvertAction({
-        customerId1: selectedIds[0],
-        customerId2: selectedIds[1] || selectedIds[0], // Fallback to same ID if only one selected
+        customerId1: selectedVisits[0].customerId,
+        customerId2: (selectedVisits[1] || selectedVisits[0]).customerId,
         toEmployee: toEmployee,
-        branchId: currentBranch
+        branchId: currentBranch,
+        api_key: apiKey
       });
 
       if (result.success) {
@@ -68,31 +92,37 @@ const Duplicates: React.FC = () => {
         refetch();
       }
     } catch (err) {
-      console.error("Conversion failed:", err);
+      // toast.error handled in service
     } finally {
-      setIsSubmitting(false);
+      setIsSubmitting(true); // Keep submitting true until page refreshes or dialog closes
+      setTimeout(() => setIsSubmitting(false), 2000);
     }
   };
 
-  const handleDeleteImage = async (clusterId: string, eventId: string | null) => {
+  const handleDeleteImage = async (visitId: string, eventId: string | null) => {
     if (!eventId) {
       toast.error("Cannot delete image: Missing Event ID");
       return;
     }
 
+    if (!window.confirm("Are you sure you want to delete this image? This action cannot be undone.")) {
+      return;
+    }
+
     try {
-      const result = await sendConformationAction({
-        id: clusterId,
-        eventId: eventId,
-        approve: false,
+      const result = await deleteEvent({
         branchId: currentBranch,
-        date: dateRange.startDate
+        visitId: visitId,
+        eventId: eventId,
+        api_key: apiKey
       });
+
       if (result.success) {
+        toast.success("Image deleted successfully");
         refetch();
       }
     } catch (err) {
-      console.error("Delete failed:", err);
+      // toast.error handled in service
     }
   };
 
@@ -118,7 +148,7 @@ const Duplicates: React.FC = () => {
     return hasMatchingCustomerId || hasMatchingClusterId || hasMatchingVisitId;
   }) || [];
 
-  const duplicateGroupsJson = React.useMemo(() => {
+  const duplicateGroupsJson = useMemo(() => {
     if (!filteredClusters.length) return null;
     return filteredClusters.map((c: any) => ({
       clusterId: c.clusterId,
@@ -189,6 +219,18 @@ const Duplicates: React.FC = () => {
               />
             </div>
             <div className="flex gap-2 w-full md:w-auto">
+              <div className="flex-1 md:w-64 relative">
+                <Input
+                  type="password"
+                  placeholder="Enter API Key..."
+                  className="h-11 bg-white border-slate-200 rounded-xl text-sm font-medium pr-10"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <div className={`w-2 h-2 rounded-full ${apiKey ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                </div>
+              </div>
               <div className="hidden lg:flex items-center gap-2 px-4 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-600">
                 <MapPin className="w-3 h-3 text-blue-500" /> {currentBranch}
               </div>
@@ -353,10 +395,7 @@ const Duplicates: React.FC = () => {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              // Fallback: if img.eventId is missing but it's not primary, try to derive from name
-                              const resolvedEventId = img.eventId ||
-                                (!img.isPrimary && img.name ? img.name.replace(/\.[^.]+$/, '') : null);
-                              handleDeleteImage(cluster.clusterId, resolvedEventId);
+                              handleDeleteImage(visit.visitId, img.eventId);
                             }}
                             className="absolute top-2 right-2 z-20 p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm shadow-sm"
                             title="Reject/Delete Event"

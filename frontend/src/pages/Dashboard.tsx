@@ -1,11 +1,74 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useSystemMetrics } from '../hooks/useMetrics';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { useAppStore } from '../store/useStore';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { triggerIngest, checkIngestStatus } from '../services/api';
+import { Database, Calendar, Key, RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
 
 const Dashboard: React.FC = () => {
-  const { currentBranch, dateRange } = useAppStore();
-  const { data: metrics } = useSystemMetrics(currentBranch, dateRange.startDate);
+  const { currentBranch, setBranch } = useAppStore();
+  const [apiKey, setApiKey] = useState('');
+  const [manualBranch, setManualBranch] = useState(currentBranch);
+  const [targetDate, setTargetDate] = useState(new Date().toISOString().split('T')[0]);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const { data: metrics, refetch: refetchMetrics } = useSystemMetrics(currentBranch, targetDate);
+
+  const [ingestMessage, setIngestMessage] = useState('');
+
+  useEffect(() => {
+    setManualBranch(currentBranch);
+  }, [currentBranch]);
+
+  useEffect(() => {
+    let pollInterval: NodeJS.Timeout;
+    if (isProcessing) {
+      pollInterval = setInterval(async () => {
+        try {
+          const res = await checkIngestStatus(manualBranch, targetDate);
+          if (res.status === 'completed') {
+            setIsProcessing(false);
+            setIngestMessage('');
+            toast.success(`Data Ingestion for ${manualBranch} Completed!`);
+
+            if (manualBranch === currentBranch) {
+              refetchMetrics();
+            } else {
+              toast.info(`Switching to branch ${manualBranch} to view new data`);
+              setBranch(manualBranch);
+            }
+            clearInterval(pollInterval);
+          } else if (res.message) {
+            setIngestMessage(res.message);
+          }
+        } catch (e) {
+          console.error("Polling error", e);
+        }
+      }, 5000);
+    }
+    return () => clearInterval(pollInterval);
+  }, [isProcessing, manualBranch, targetDate, refetchMetrics, currentBranch, setBranch]);
+
+  const handleIngest = async () => {
+    if (!apiKey) {
+      toast.error("Please enter an API Key");
+      return;
+    }
+    if (!manualBranch) {
+      toast.error("Please enter a Branch ID");
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      await triggerIngest(manualBranch, targetDate, apiKey);
+      toast.info(`Ingestion started for ${manualBranch} in background...`);
+    } catch (err) {
+      setIsProcessing(false);
+      toast.error("Failed to start ingestion");
+    }
+  };
 
   // Mock stats if not available
   const stats = metrics?.stats || {
@@ -18,7 +81,84 @@ const Dashboard: React.FC = () => {
 
   return (
     <div className="p-6 space-y-6">
-      <h1 className="text-3xl font-bold">System Overview</h1>
+      <div className="flex justify-between items-center">
+        <h1 className="text-3xl font-bold">System Overview</h1>
+      </div>
+
+      {/* Control Panel: API Fetching */}
+      <Card className="border-blue-100 bg-blue-50/30">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Database className="w-5 h-5 text-blue-600" />
+            Manual Data Ingestion
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase text-slate-500">Branch ID</label>
+              <div className="relative">
+                <Database className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <Input
+                  placeholder="e.g. EA-NATURALS"
+                  value={manualBranch}
+                  onChange={(e) => setManualBranch(e.target.value)}
+                  className="pl-10 h-11 bg-white border-slate-200"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase text-slate-500">Target Date</label>
+              <div className="relative">
+                <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <Input
+                  type="date"
+                  value={targetDate}
+                  onChange={(e) => setTargetDate(e.target.value)}
+                  className="pl-10 h-11 bg-white border-slate-200"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase text-slate-500">API Key</label>
+              <div className="relative">
+                <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <Input
+                  placeholder="Enter token..."
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  className="pl-10 h-11 bg-white border-slate-200"
+                />
+              </div>
+            </div>
+            <div className="flex items-end">
+              <Button
+                onClick={handleIngest}
+                disabled={isProcessing}
+                className={`w-full h-11 font-bold transition-all ${isProcessing ? 'bg-slate-200' : 'bg-blue-600 hover:bg-blue-700 shadow-lg text-white'}`}
+              >
+                {isProcessing ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                    Processing...
+                  </>
+                ) : (
+                  "Start Ingestion"
+                )}
+              </Button>
+            </div>
+          </div>
+
+          {isProcessing && (
+            <div className="mt-4 p-3 bg-white rounded-lg border border-blue-100 flex items-center gap-3 animate-pulse">
+              <div className="w-2 h-2 bg-blue-600 rounded-full animate-ping" />
+              <p className="text-xs font-semibold text-blue-800">
+                {ingestMessage || `Backend is currently fetching visits and generating embeddings for ${manualBranch} on ${targetDate}.`}
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">

@@ -18,6 +18,8 @@ class EnrollmentCheck(BaseModel):
     branchId: Optional[str] = None
     return_crops: Optional[bool] = False
     crop_padding: Optional[int] = 0
+    run_liveness: Optional[bool] = False
+    liveness_backend: Optional[str] = "opencv"
 
 
 def crop_by_bbox(img_bgr, bbox, pad: int = 0):
@@ -40,6 +42,57 @@ def crop_by_bbox(img_bgr, bbox, pad: int = 0):
 
 def create_check_enrollment_router(*, config, model_manager, embedding_service, file_manager, qdrant_manager) -> APIRouter:
     router = APIRouter()
+
+    def _deepface_liveness(*, img_bgr, face_bbox: Optional[list[int]], pad: int, backend: str):
+        try:
+            from deepface import DeepFace
+        except Exception as ie:
+            return {
+                "ok": False,
+                "error": (
+                    f"DeepFace import failed: {ie}. "
+                    "DeepFace must be installed in the same Python environment that runs the backend (PM2 uses backend/venv)."
+                ),
+            }
+
+        try:
+            crop_bgr = crop_by_bbox(img_bgr, face_bbox, pad=pad) if face_bbox else img_bgr
+            if crop_bgr is None:
+                return {
+                    "ok": False,
+                    "error": "No face crop available for liveness",
+                }
+
+            crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+            faces = DeepFace.extract_faces(
+                img_path=crop_rgb,
+                detector_backend=backend,
+                enforce_detection=False,
+                anti_spoofing=True,
+            )
+
+            if not faces:
+                return {
+                    "ok": False,
+                    "error": "DeepFace returned no faces",
+                }
+
+            f0 = faces[0] or {}
+            is_real = f0.get("is_real", None)
+            score = f0.get("antispoof_score", None)
+
+            return {
+                "ok": True,
+                "is_real": bool(is_real) if is_real is not None else None,
+                "score": float(score) if score is not None else None,
+                "backend": backend,
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "backend": backend,
+            }
 
     @router.post("/api/check-enrollment")
     async def check_enrollment(payload: EnrollmentCheck):
@@ -105,11 +158,25 @@ def create_check_enrollment_router(*, config, model_manager, embedding_service, 
                         if ok:
                             crops_b64.append(base64.b64encode(buf.tobytes()).decode("utf-8"))
 
+            liveness = None
+            if bool(payload.run_liveness):
+                first_bbox = None
+                if bboxes:
+                    first_bbox = [bboxes[0]["x1"], bboxes[0]["y1"], bboxes[0]["x2"], bboxes[0]["y2"]]
+                backend = str(payload.liveness_backend or "opencv")
+                liveness = _deepface_liveness(
+                    img_bgr=img_bgr,
+                    face_bbox=first_bbox,
+                    pad=int(payload.crop_padding or 0),
+                    backend=backend,
+                )
+
             result = embedding_service.extract_face_features(img_bgr)
             if not result or result.embedding is None:
                 return {
                     "enrolled": False,
                     "reason": "No face detected or embedding failed",
+                    "liveness": liveness,
                     "persons_count": len(faces),
                     "bboxes": bboxes,
                     "crops": crops_b64 if payload.return_crops else None,
@@ -143,6 +210,7 @@ def create_check_enrollment_router(*, config, model_manager, embedding_service, 
                 "enrolled": is_enrolled,
                 "score": search_result[0].score if is_enrolled else 0.0,
                 "match": search_result[0].payload if is_enrolled else None,
+                "liveness": liveness,
                 "persons_count": len(faces),
                 "bboxes": bboxes,
                 "crops": crops_b64 if payload.return_crops else None,

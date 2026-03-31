@@ -18,26 +18,18 @@ from datetime import datetime, timedelta
 import numpy as np
 import httpx
 
-class DeleteEventRequest(BaseModel):
-    branchId: Optional[str] = None
-    visitId: str
-    eventId: str
-    api_key: Optional[str] = None
-
 class ConformationAction(BaseModel):
     id: str
     eventId: str
     approve: bool
     branchId: Optional[str] = None
     date: Optional[str] = None
-    api_key: Optional[str] = None
 
 class ConvertAction(BaseModel):
     branchId: Optional[str] = None
     customerId1: str
     customerId2: str
     toEmployee: bool
-    api_key: Optional[str] = None
 
 class CompareFacesRequest(BaseModel):
     image1: str
@@ -62,15 +54,9 @@ from backend.api.check_enrollment import create_check_enrollment_router
 from backend.core.clustering.similarity import cosine_similarity
 
 # Configuration setup
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-
 def load_config():
-    with open(CONFIG_PATH, "r") as f:
+    with open(os.path.join(os.path.dirname(__file__), "config.json"), "r") as f:
         return json.load(f)
-
-def save_config(new_config):
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(new_config, f, indent=2)
 
 config = load_config()
 
@@ -406,7 +392,7 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool):
             # 3. Ingest (Embeddings -> Qdrant)
             # Use the shared executor but don't create a new event loop inside the worker
             # The ingestion_pipeline.process_visits is an async function, so we should run it in the loop
-            ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id)
+            ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str)
             logging.info(f"PIPELINE: Ingestion completed for {b_id} - {ingest_res.get('metrics')} - Upserted {ingest_res.get('upserted_count', 0)} points")
 
             # 4. Identity Resolution (Clustering)
@@ -435,20 +421,18 @@ async def run_pipeline_sync():
     Background task that fetches new visits since lastUpdated and processes them in real-time.
     Iterates over all branches configured in config.json in parallel.
     """
+    interval = config["api"].get("fetchInterval", 2) # Default 2 mins
+    
     while True:
         try:
-            # Reload config to pick up dynamic changes from Dashboard
-            current_config = load_config()
-            interval = current_config["api"].get("fetchInterval", 2) # Default 2 mins
-            
             # Check if API fetching is disabled in config
-            if not current_config.get("api", {}).get("enabled", True):
+            if not config.get("api", {}).get("enabled", True):
                 logging.info("PIPELINE: API fetching is disabled in config. Skipping sync.")
                 await asyncio.sleep(interval * 60)
                 continue
 
             # Get branches from config
-            api_configs = current_config["api"].get("configs", [])
+            api_configs = config["api"].get("configs", [])
             if not api_configs:
                 logging.warning("PIPELINE: No branch configurations found in config.json")
                 await asyncio.sleep(interval * 60)
@@ -457,7 +441,7 @@ async def run_pipeline_sync():
             now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
             date_str = now_ist.strftime("%Y-%m-%d")
             
-            restart_enabled = current_config.get("api", {}).get("restart", False)
+            restart_enabled = config.get("api", {}).get("restart", False)
 
             # Process all branches in parallel
             tasks = [sync_branch(cfg, date_str, restart_enabled) for cfg in api_configs]
@@ -474,8 +458,7 @@ async def run_pipeline_sync():
 
             # Reset restart flag after one full cycle
             if restart_enabled:
-                current_config["api"]["restart"] = False
-                save_config(current_config)
+                config["api"]["restart"] = False
 
         except Exception as e:
             logging.error(f"PIPELINE GLOBAL ERROR: {e}", exc_info=True)
@@ -557,29 +540,7 @@ async def ingest_visits(
 ):
     """
     Trigger ingestion and identity resolution for a specific date and branch.
-    Also persists the branch configuration for continuous background syncing.
     """
-    global config
-    
-    # Update global config and persist to disk for continuous sync
-    current_configs = config["api"].get("configs", [])
-    existing_cfg = next((c for c in current_configs if c.get("branchId") == payload.branchId), None)
-    
-    if existing_cfg:
-        existing_cfg["api_key"] = payload.api_key
-        # We don't overwrite the date in config to avoid jumping back/forth, 
-        # but we use the payload date for the immediate sync below.
-    else:
-        current_configs.append({
-            "branchId": payload.branchId,
-            "api_key": payload.api_key,
-            "startDate": payload.date
-        })
-        config["api"]["configs"] = current_configs
-        save_config(config)
-        # Update the live api_service so the background loop sees it
-        api_service.configs = current_configs
-
     branch_cfg = {
         "branchId": payload.branchId,
         "api_key": payload.api_key
@@ -589,7 +550,7 @@ async def ingest_visits(
     active_ingestions[(payload.branchId, payload.date)] = time.time()
     
     background_tasks.add_task(sync_branch, branch_cfg, payload.date, False)
-    return {"status": "started", "message": f"Ingestion started for {payload.branchId}. Added to continuous sync pipeline."}
+    return {"status": "started", "message": f"Ingestion started for {payload.branchId} on {payload.date}"}
 
 @app.get("/api/ingest/status")
 async def get_ingest_status(branchId: str, date: str):
@@ -720,8 +681,7 @@ async def conformation_action(action: ConformationAction):
     result = await api_service.send_conformation_action(
         branch_id=branch_id,
         date=date,
-        action_data=action.dict(),
-        api_key_override=action.api_key
+        action_data=action.dict()
     )
 
     if not result["success"]:
@@ -736,53 +696,16 @@ async def convert_action(action: ConvertAction):
     """
     branch_id = action.branchId or config["api"].get("branchId", "TMJ-CBE")
     
-    print(f"DEBUG: Convert action for branch {branch_id}")
-    print(f"DEBUG: Payload: {action.dict()}")
-    
     payload = {
         "customerId1": action.customerId1,
         "customerId2": action.customerId2,
         "toEmployee": action.toEmployee
     }
 
-    try:
-        print(f"DEBUG: Calling api_service.send_convert_action with branch_id={branch_id}")
-        result = await api_service.send_convert_action(
-            branch_id=branch_id,
-            payload=payload,
-            api_key_override=action.api_key
-        )
-        print(f"DEBUG: api_service.send_convert_action result: {result}")
-    except Exception as e:
-        print(f"ERROR in convert_action: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-
-    if not result["success"]:
-        raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])
-    
-    return result
-
-@app.delete("/api/delete-event")
-async def delete_event(action: DeleteEventRequest):
-    """
-    Proxy to external delete event API.
-    """
-    branch_id = action.branchId or config["api"].get("branchId", "TMJ-CBE")
-    
-    try:
-        result = await api_service.send_delete_event(
-            branch_id=branch_id,
-            visit_id=action.visitId,
-            event_id=action.eventId,
-            api_key_override=action.api_key
-        )
-    except Exception as e:
-        print(f"ERROR in delete_event: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+    result = await api_service.send_convert_action(
+        branch_id=branch_id,
+        payload=payload
+    )
 
     if not result["success"]:
         raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])

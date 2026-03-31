@@ -1,0 +1,100 @@
+[
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "0a57b5e6-7fa6-448c-90bd-d4200b7be135-3272026-12549PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-27T18:08:20.935758"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "870e0086-67e6-4ccb-a763-cddd08678776-3272026-51204PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-27T19:44:49.614305"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "8fb3e6ff-1984-477b-b547-3ddbb9be7bd5-3272026-12258PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:09:59.770108"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "8fb3e6ff-1984-477b-b547-3ddbb9be7bd5-3272026-12258PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:09:59.771423"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "8fb3e6ff-1984-477b-b547-3ddbb9be7bd5-3272026-12258PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:09:59.850048"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "8fb3e6ff-1984-477b-b547-3ddbb9be7bd5-3272026-12258PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:09:59.856600"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "8fb3e6ff-1984-477b-b547-3ddbb9be7bd5-3272026-12258PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:09:59.863193"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "8fb3e6ff-1984-477b-b547-3ddbb9be7bd5-3272026-12258PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:10:02.360661"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "8fb3e6ff-1984-477b-b547-3ddbb9be7bd5-3272026-12258PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:10:02.363031"
+  },
+  {
+    "clusterId": "cluster_acd5dacd",
+    "eventId": "8b961022-75c7-4eda-b042-bec0597f2082-3272026-123753PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:10:25.032621"
+  },
+  {
+    "clusterId": "visitor-94286",
+    "eventId": "dff9b069-df1b-49fb-94ac-7ed68cf156bf-3272026-125905PM",
+    "approve": false,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:16:36.135630"
+  },
+  {
+    "clusterId": "visitor-94286",
+    "eventId": "dff9b069-df1b-49fb-94ac-7ed68cf156bf-3272026-125905PM",
+    "approve": true,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:16:50.252920"
+  },
+  {
+    "clusterId": "visitor-94286",
+    "eventId": "f7f29d00-44fa-4121-9bf9-37280cbbe663-3272026-125328PM",
+    "approve": true,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:17:06.748720"
+  },
+  {
+    "clusterId": "visitor-94286",
+    "eventId": "f7f29d00-44fa-4121-9bf9-37280cbbe663-3272026-125328PM",
+    "approve": true,
+    "status": "failed",
+    "timestamp": "2026-03-28T12:17:19.473426"
+  }
+]

@@ -58,6 +58,7 @@ export const sendConformationAction = async (data: {
   approve: boolean;
   branchId?: string;
   date?: string;
+  api_key?: string;
 }) => {
   try {
     const response = await api.put('/api/conformation/action', data);
@@ -79,13 +80,35 @@ export const sendConvertAction = async (data: {
   customerId2: string;
   toEmployee: boolean;
   branchId?: string;
+  api_key?: string;
 }) => {
   try {
-    const response = await api.post('/convert', data);
+    const response = await api.post('/api/convert', data);
     if (response.data.success) {
       toast.success('Conversion successful');
     } else {
       toast.error(`Conversion failed: ${response.data.error || 'Unknown error'}`);
+    }
+    return response.data;
+  } catch (error: any) {
+    const errorMsg = error.response?.data?.detail || error.message || 'Network error';
+    toast.error(`Error: ${errorMsg}`);
+    throw error;
+  }
+};
+
+export const deleteEvent = async (data: {
+  branchId?: string;
+  visitId: string;
+  eventId: string;
+  api_key?: string;
+}) => {
+  try {
+    const response = await api.delete('/api/delete-event', { data });
+    if (response.data.success) {
+      toast.success('Image deleted successfully');
+    } else {
+      toast.error(`Delete failed: ${response.data.error || 'Unknown error'}`);
     }
     return response.data;
   } catch (error: any) {
@@ -114,6 +137,16 @@ export const fetchFullClusters = async (branchId: string, date: string) => {
       date,
     },
   });
+  return response.data;
+};
+
+export const triggerIngest = async (branchId: string, date: string, apiKey?: string) => {
+  const response = await api.post('/api/ingest', { branchId, date, api_key: apiKey });
+  return response.data;
+};
+
+export const checkIngestStatus = async (branchId: string, date: string) => {
+  const response = await api.get('/api/ingest/status', { params: { branchId, date } });
   return response.data;
 };
 
