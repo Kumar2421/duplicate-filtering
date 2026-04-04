@@ -9,7 +9,7 @@ import { Database, Calendar, Key, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 
 const Dashboard: React.FC = () => {
-  const { currentBranch, setBranch } = useAppStore();
+  const { currentBranch, setCurrentBranch } = useAppStore();
   const [apiKey, setApiKey] = useState('');
   const [manualBranch, setManualBranch] = useState(currentBranch);
   const [targetDate, setTargetDate] = useState(new Date().toISOString().split('T')[0]);
@@ -37,7 +37,7 @@ const Dashboard: React.FC = () => {
               refetchMetrics();
             } else {
               toast.info(`Switching to branch ${manualBranch} to view new data`);
-              setBranch(manualBranch);
+              setCurrentBranch(manualBranch);
             }
             clearInterval(pollInterval);
           } else if (res.message) {
@@ -49,7 +49,7 @@ const Dashboard: React.FC = () => {
       }, 5000);
     }
     return () => clearInterval(pollInterval);
-  }, [isProcessing, manualBranch, targetDate, refetchMetrics, currentBranch, setBranch]);
+  }, [isProcessing, manualBranch, targetDate, refetchMetrics, currentBranch, setCurrentBranch]);
 
   const handleIngest = async () => {
     if (!apiKey) {

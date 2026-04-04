@@ -86,9 +86,19 @@ def extract_images(visit: Dict[str, Any]) -> List[Dict[str, Any]]:
             "url": visit["image"],
             "source": "primary"
         })
+    elif visit.get("imageUrl"):
+        images.append({
+            "url": visit["imageUrl"],
+            "source": "primary"
+        })
+    elif visit.get("refImage"):
+        images.append({
+            "url": visit["refImage"],
+            "source": "primary"
+        })
 
     # 2. Reference
-    if visit.get("refImage"):
+    if visit.get("refImage") and not any(img["url"] == visit["refImage"] for img in images):
         images.append({
             "url": visit["refImage"],
             "source": "ref"
@@ -134,6 +144,7 @@ def normalize_visit(visit: Dict[str, Any]) -> Dict[str, Any]:
         "customerId": visit.get("customerId"),
         "branchId": visit.get("branchId"),
         "date": visit.get("date"),
+        "isEmployee": visit.get("isEmployee", False),
         "image": main_image,
         "images": extracted_images
     }

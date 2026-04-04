@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, AsyncGenerator, Set
 from backend.utils.normalizer import normalize_visit_data, fetch_and_prepare
+from backend.services.analytics_auth_service import AnalyticsAuthService
 
 class APIService:
     def __init__(
@@ -16,7 +17,8 @@ class APIService:
         category: str = "potential",
         time_range: str = "0,300,18000",
         enabled: bool = True,
-        configs: List[Dict[str, Any]] = None
+        configs: List[Dict[str, Any]] = None,
+        auth_service: Optional[AnalyticsAuthService] = None,
     ):
         self.base_url = base_url
         self.limit = limit
@@ -24,9 +26,37 @@ class APIService:
         self.time_range = time_range
         self.enabled = enabled
         self.configs = configs or []
+        self.auth_service = auth_service
         self.logger = logging.getLogger(__name__)
         self.state_dir = "data/state"
         os.makedirs(self.state_dir, exist_ok=True)
+
+    async def _get_upstream_headers(
+        self,
+        *,
+        branch_id: str,
+        api_key_override: Optional[str],
+        force_refresh: bool = False,
+    ) -> Dict[str, str]:
+        if api_key_override:
+            # Manual override token (used for debugging / one-off calls)
+            return {
+                "Authorization": f"Bearer {api_key_override}",
+                "x-cache-bypass": "true",
+            }
+
+        if self.auth_service is not None:
+            if force_refresh:
+                await self.auth_service.get_branch_token(branch_id, force_refresh=True)
+            return await self.auth_service.get_auth_headers(branch_id)
+
+        # Fallback to legacy config-based api_key (kept for backwards compat)
+        api_key = self._get_api_key_for_branch(branch_id)
+        headers: Dict[str, str] = {"x-cache-bypass": "true"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["x-api-key"] = api_key
+        return headers
 
     def _get_api_key_for_branch(self, branch_id: str) -> Optional[str]:
         for cfg in self.configs:
@@ -85,19 +115,26 @@ class APIService:
             "isGroup": "true"
         }
         
-        headers = {}
-        api_key = api_key_override or self._get_api_key_for_branch(branch_id)
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-            headers["x-api-key"] = api_key
+        headers = await self._get_upstream_headers(branch_id=branch_id, api_key_override=api_key_override)
 
         for attempt in range(retries):
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(self.base_url, params=params, headers=headers, timeout=20.0)
+                async with httpx.AsyncClient(verify=False, timeout=20.0, http2=True) as client:
+                    response = await client.get(self.base_url, params=params, headers=headers)
+
+                    # If token expired or branch token is wrong, refresh once and retry.
+                    if response.status_code == 401 and self.auth_service is not None and not api_key_override:
+                        self.logger.warning(f"Attempt {attempt+1}: Received 401 for {date} page {page}. Refreshing token and retrying once.")
+                        headers = await self._get_upstream_headers(
+                            branch_id=branch_id,
+                            api_key_override=api_key_override,
+                            force_refresh=True,
+                        )
+                        response = await client.get(self.base_url, params=params, headers=headers)
+
                     if response.status_code == 200:
                         return response.json()
-                    
+
                     self.logger.warning(f"Attempt {attempt+1}: Received {response.status_code} for {date} page {page}")
             except Exception as e:
                 self.logger.error(f"Attempt {attempt+1}: Error fetching {date} page {page}: {str(e)}")
@@ -226,17 +263,28 @@ class APIService:
             "approve": bool(action_data["approve"])
         }
 
-        api_key = api_key_override or self._get_api_key_for_branch(branch_id)
+        if api_key_override:
+            api_key = api_key_override
+        elif self.auth_service is not None:
+            api_key = await self.auth_service.get_branch_token(branch_id)
+        else:
+            api_key = self._get_api_key_for_branch(branch_id)
         headers = {
             "Authorization": f"Bearer {api_key}" if api_key else "",
             "Content-Type": "application/json",
             "accept": "application/json, text/plain, */*",
+            "accept-language": "en-US,en;q=0.9,en-IN;q=0.8",
             "referer": "https://analytics.develop.thefusionapps.com/",
+            "origin": "https://analytics.develop.thefusionapps.com",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
             "dnt": "1",
             "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"'
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+            "x-cache-bypass": "true"
         }
 
         try:
@@ -263,23 +311,40 @@ class APIService:
 
         return {"success": False, "error": "Unknown error in proxy pipeline"}
 
-    async def send_convert_action(self, branch_id: str, payload: Dict[str, Any], api_key_override: Optional[str] = None) -> Dict[str, Any]:
+    async def send_convert_action(
+        self,
+        branch_id: str,
+        payload: Dict[str, Any],
+        api_key_override: Optional[str] = None,
+        timeout_seconds: float = 8.0,
+        connect_timeout_seconds: float = 5.0,
+    ) -> Dict[str, Any]:
         """
         Proxy call to v3 convert API.
         """
-        api_url = "https://api.analytics.thefusionapps.com/api/v3/convert/"
+        api_urls = [
+            "https://api.analytics.thefusionapps.com/api/v3/convert/",
+            "https://api.analytics.thefusionapps.com/api/v3/convert",
+        ]
         
-        api_key = api_key_override or self._get_api_key_for_branch(branch_id)
+        if api_key_override:
+            api_key = api_key_override
+        elif self.auth_service is not None:
+            api_key = await self.auth_service.get_branch_token(branch_id)
+        else:
+            api_key = self._get_api_key_for_branch(branch_id)
         headers = {
             "Authorization": f"Bearer {api_key}" if api_key else "",
             "Content-Type": "application/json",
             "accept": "application/json, text/plain, */*",
             "referer": "https://analytics.develop.thefusionapps.com/",
+            "origin": "https://analytics.develop.thefusionapps.com",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
             "dnt": "1",
             "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"'
+            "sec-ch-ua-platform": '"Windows"',
+            "x-cache-bypass": "true"
         }
 
         # The external API confirmed it uses 'toEmployee'
@@ -290,10 +355,51 @@ class APIService:
         }
 
         try:
-            # Reverting back to standard JSON post since text/plain was likely not the cause of 400
-            timeout = httpx.Timeout(120.0, connect=30.0)
-            async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
-                res = await client.post(api_url, json=external_payload, headers=headers)
+            # Keep this below typical reverse-proxy timeouts so the app responds (with CORS headers)
+            # instead of the gateway returning a 504 without CORS.
+            timeout = httpx.Timeout(timeout_seconds, connect=connect_timeout_seconds)
+            async with httpx.AsyncClient(verify=False, timeout=timeout, http2=True) as client:
+                res = None
+                last_error_res = None
+
+                # Upstream behavior has been inconsistent across environments; try a small matrix.
+                for url in api_urls:
+                    for method in ("POST", "PUT"):
+                        try:
+                            if method == "POST":
+                                candidate = await client.post(url, json=external_payload, headers=headers)
+                            else:
+                                candidate = await client.put(url, json=external_payload, headers=headers)
+
+                            # Prefer immediate success
+                            if candidate.status_code in [200, 201]:
+                                res = candidate
+                                break
+
+                            # Keep the latest non-success for error details
+                            last_error_res = candidate
+
+                            # If it's not a "bad request/method" case, don't spam retries.
+                            if candidate.status_code not in [400, 404, 405]:
+                                res = candidate
+                                break
+                        except Exception:
+                            # keep trying the next combination
+                            continue
+
+                    if res is not None and res.status_code in [200, 201]:
+                        break
+
+                if res is None:
+                    res = last_error_res
+
+                if res is None:
+                    return {
+                        "success": False,
+                        "status_code": 500,
+                        "response": None,
+                        "error": "Convert proxy failed without an upstream response"
+                    }
                 
                 # Safer response handling to avoid 'Expecting value: line 1 column 1' JSON error
                 response_data = None
@@ -314,11 +420,19 @@ class APIService:
                     self.logger.error(f"External API Error (Convert): Status={res.status_code}, Body={res.text[:500] if res.text else 'Empty'}")
                 
                 return result
+        except httpx.TimeoutException as e:
+            self.logger.error(f"Timeout in send_convert_action: {str(e)}")
+            return {
+                "success": False,
+                "status_code": 504,
+                "response": None,
+                "error": "Upstream convert API timeout"
+            }
         except Exception as e:
             self.logger.error(f"Error in send_convert_action: {str(e)}")
             import traceback
             self.logger.error(traceback.format_exc())
-            return {"success": False, "error": str(e)}
+            return {"success": False, "status_code": 500, "response": None, "error": str(e)}
 
     async def send_delete_event(self, branch_id: str, visit_id: str, event_id: str, api_key_override: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -328,7 +442,12 @@ class APIService:
         """
         api_url = f"https://api.analytics.thefusionapps.com/api/v2/retail/delete/event/{visit_id}/{event_id}"
         
-        api_key = api_key_override or self._get_api_key_for_branch(branch_id)
+        if api_key_override:
+            api_key = api_key_override
+        elif self.auth_service is not None:
+            api_key = await self.auth_service.get_branch_token(branch_id)
+        else:
+            api_key = self._get_api_key_for_branch(branch_id)
         headers = {
             "Authorization": f"Bearer {api_key}" if api_key else "",
             "Content-Type": "application/json",
@@ -376,6 +495,55 @@ class APIService:
             self.logger.error(f"Error in send_delete_event: {str(e)}")
             import traceback
             self.logger.error(traceback.format_exc())
+            return {"success": False, "error": str(e)}
+
+    async def send_deep_delete(self, branch_id: str, customer_id: str, api_key_override: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Proxy call to v2 retail deep delete API.
+        URL: https://api.analytics.thefusionapps.com/api/v2/retail/deepDelete/{customerId}
+        Method: DELETE
+        """
+        api_url = f"https://api.analytics.thefusionapps.com/api/v2/retail/deepDelete/{customer_id}"
+        
+        if api_key_override:
+            api_key = api_key_override
+        elif self.auth_service is not None:
+            api_key = await self.auth_service.get_branch_token(branch_id)
+        else:
+            api_key = self._get_api_key_for_branch(branch_id)
+        headers = {
+            "Authorization": f"Bearer {api_key}" if api_key else "",
+            "accept": "application/json, text/plain, */*",
+            "referer": "https://analytics.develop.thefusionapps.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+        }
+
+        try:
+            timeout = httpx.Timeout(120.0, connect=30.0)
+            async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
+                res = await client.delete(api_url, headers=headers)
+                
+                response_data = None
+                if res.content:
+                    try:
+                        response_data = res.json()
+                    except Exception:
+                        response_data = res.text[:1000]
+
+                result = {
+                    "success": res.status_code in [200, 201, 204],
+                    "status_code": res.status_code,
+                    "response": response_data,
+                    "error": None if res.is_success else (res.text[:500] if res.text else f"HTTP {res.status_code}")
+                }
+                
+                if not result["success"]:
+                    self.logger.error(f"External API Error (Deep Delete): Status={res.status_code}, Body={res.text[:500] if res.text else 'Empty'}")
+                
+                return result
+
+        except Exception as e:
+            self.logger.error(f"Error in send_deep_delete: {str(e)}")
             return {"success": False, "error": str(e)}
 
     def _log_action_locally(self, branch_id: str, date: str, payload: Dict[str, Any], result: Dict[str, Any]):

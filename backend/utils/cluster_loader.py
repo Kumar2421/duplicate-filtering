@@ -192,10 +192,10 @@ def get_filtered_duplicates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not is_flagged and len(c.get("visits", [])) >= 2:
             is_flagged = True
 
-        # 3. Check visits for conflictIds (Identity Issues)
+        # 3. Check visits for conflictIds (Identity Issues) or isEmployee flag
         if not is_flagged:
             for v in c.get("visits", []):
-                if v.get("conflictIds") and len(v.get("conflictIds")) > 0:
+                if (v.get("conflictIds") and len(v.get("conflictIds")) > 0) or v.get("isEmployee") is True:
                     is_flagged = True
                     break
         

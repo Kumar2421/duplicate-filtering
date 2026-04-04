@@ -81,6 +81,7 @@ def normalize_visit(visit: Dict[str, Any]) -> Dict[str, Any]:
         "customerId": visit.get("customerId"),
         "branchId": visit.get("branchId"),
         "date": visit.get("date"),
+        "isEmployee": visit.get("isEmployee", False),
         "raw": visit,
         "images": extract_images(visit),
     }

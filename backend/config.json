@@ -4,44 +4,33 @@
     "base_url": "https://api.analytics.thefusionapps.com/api/v4/retail/visit-stats",
     "configs": [
       {
-        "branchId": "TMJ-CBE",
-        "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjUyLCJicmFuY2hJZCI6IlRNSi1DQkUifSwiaWF0IjoxNzc0NDQwNDMxLCJleHAiOjE3NzQ1MjY4MzF9.9etL7gGsQtywP1tcETfaXpOv14abvJ71sEOJWniQfmk",
-        "date": "26.03.2026"
-      },
-      {
         "branchId": "CBE-TRS",
-        "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjI3LCJicmFuY2hJZCI6IkNCRS1UUlMifSwiaWF0IjoxNzc0NjkwMTA2LCJleHAiOjE3NzQ3NzY1MDZ9.0yDONC7l4Htj_Rm7In4P_NUVDk0o3Uii-zThidjiz0s",
-        "startDate": "2026-03-27"
-      },
-      {
-        "branchId": "\tEA-NATURALS",
-        "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjM0LCJicmFuY2hJZCI6IkVBLU5BVFVSQUxTIn0sImlhdCI6MTc3NDY5MDI1NiwiZXhwIjoxNzc0Nzc2NjU2fQ.OCfwdmuPYPHqZkba1wN6xIou5GBv-WxDDok5cLCexVI",
-        "startDate": "2026-03-28"
+        "startDate": "2026-03-30"
       },
       {
         "branchId": "CBE-TITAN",
-        "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjMyLCJicmFuY2hJZCI6IkNCRS1USVRBTiJ9LCJpYXQiOjE3NzQ2OTM0NDcsImV4cCI6MTc3NDc3OTg0N30.PqkxDN355VOiV1Hg2a2fKi89pmRYz0rs7atQNFAiw1k",
-        "startDate": "2026-03-28"
+        "startDate": "2026-04-04"
       },
       {
         "branchId": "EA-NATURALS",
-        "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjM0LCJicmFuY2hJZCI6IkVBLU5BVFVSQUxTIn0sImlhdCI6MTc3NDg2MTIzMiwiZXhwIjoxNzc0OTQ3NjMyfQ.EEzlRLRMxfxsVUW5cW-6uNA_XffO9pnay8ksDYe2igg",
-        "startDate": "2026-03-28"
+        "startDate": "2026-04-04"
+      },{
+        "branchId": "GT-CBE",
+        "startDate": "2026-04-04"
       },
       {
-        "branchId": "CBE-TITEN",
-        "api_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyRGF0YSI6eyJpZCI6MTAsInVzZXJOYW1lIjoiRnVzaW9uIFN1cHBvcnQiLCJ0ZW5hbnRJZCI6MTAsInJvbGUiOiJ0ZW5hbnQiLCJzbHVnIjoiYW5hbHl0aWNzIn0sImJyYW5jaERhdGEiOnsiaWQiOjMyLCJicmFuY2hJZCI6IkNCRS1USVRBTiJ9LCJpYXQiOjE3NzQ4NjU5MTAsImV4cCI6MTc3NDk1MjMxMH0.9bYFmp_onbz64o509fJ6AXMj0bOu3eXqCRLm-NyxxPQ",
-        "startDate": "2026-03-30"
+        "branchId": "TMJ-CBE",
+        "startDate": "2026-04-04"
       }
     ],
-    "category": "potential",
+    "category": "all",
     "timeRange": "0,300,18000",
     "restart": false,
     "fetchInterval": 2
   },
   "model": {
     "name": "buffalo_l",
-    "threshold": 0.75,
+    "threshold": 0.7,
     "quality_filter": {
       "min_blur": 30.0,
       "min_confidence": 0.85,

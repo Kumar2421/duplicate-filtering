@@ -61,7 +61,11 @@ export const sendConformationAction = async (data: {
   api_key?: string;
 }) => {
   try {
-    const response = await api.put('/api/conformation/action', data);
+    const response = await api.put('/api/conformation/action', data, {
+      headers: {
+        'x-cache-bypass': 'true',
+      },
+    });
     if (response.data.success) {
       toast.success(`Action ${data.approve ? 'Approved' : 'Rejected'} successfully`);
     } else {
@@ -83,18 +87,27 @@ export const sendConvertAction = async (data: {
   api_key?: string;
 }) => {
   try {
-    const response = await api.post('/api/convert', data);
-    if (response.data.success) {
-      toast.success('Conversion successful');
-    } else {
-      toast.error(`Conversion failed: ${response.data.error || 'Unknown error'}`);
-    }
+    const response = await api.post('/api/convert', data, {
+      headers: {
+        'x-cache-bypass': 'true',
+      },
+    });
     return response.data;
   } catch (error: any) {
     const errorMsg = error.response?.data?.detail || error.message || 'Network error';
     toast.error(`Error: ${errorMsg}`);
     throw error;
   }
+};
+
+export const fetchConvertJobStatus = async (jobId: string) => {
+  const response = await api.get('/api/convert/status', {
+    params: { jobId },
+    headers: {
+      'x-cache-bypass': 'true',
+    },
+  });
+  return response.data;
 };
 
 export const deleteEvent = async (data: {
@@ -104,11 +117,41 @@ export const deleteEvent = async (data: {
   api_key?: string;
 }) => {
   try {
-    const response = await api.delete('/api/delete-event', { data });
+    const response = await api.delete('/api/delete-event', {
+      data,
+      headers: {
+        'x-cache-bypass': 'true',
+      },
+    });
     if (response.data.success) {
       toast.success('Image deleted successfully');
     } else {
       toast.error(`Delete failed: ${response.data.error || 'Unknown error'}`);
+    }
+    return response.data;
+  } catch (error: any) {
+    const errorMsg = error.response?.data?.detail || error.message || 'Network error';
+    toast.error(`Error: ${errorMsg}`);
+    throw error;
+  }
+};
+
+export const deepDelete = async (data: {
+  branchId?: string;
+  customerId: string;
+  api_key?: string;
+}) => {
+  try {
+    const response = await api.delete('/api/deep-delete', {
+      data,
+      headers: {
+        'x-cache-bypass': 'true',
+      },
+    });
+    if (response.data.success) {
+      toast.success('Customer data deep deleted successfully');
+    } else {
+      toast.error(`Deep Delete failed: ${response.data.error || 'Unknown error'}`);
     }
     return response.data;
   } catch (error: any) {
@@ -141,7 +184,15 @@ export const fetchFullClusters = async (branchId: string, date: string) => {
 };
 
 export const triggerIngest = async (branchId: string, date: string, apiKey?: string) => {
-  const response = await api.post('/api/ingest', { branchId, date, api_key: apiKey });
+  const response = await api.post(
+    '/api/ingest',
+    { branchId, date, api_key: apiKey },
+    {
+      headers: {
+        'x-cache-bypass': 'true',
+      },
+    }
+  );
   return response.data;
 };
 

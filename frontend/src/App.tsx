@@ -4,6 +4,7 @@ import { LayoutDashboard, Users, UserPlus, Menu, X, Bell, ChevronDown, LogOut, S
 import Dashboard from './pages/Dashboard';
 import Visits from './pages/Visits';
 import Duplicates from './pages/Duplicates';
+import Employees from './pages/Employees';
 import { useAppStore } from './store/useStore';
 import { Button } from './components/ui/button';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
@@ -54,6 +55,7 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
           <SidebarItem to="/" icon={LayoutDashboard} label="Dashboard" active={pathname === '/'} />
           <SidebarItem to="/visits" icon={Users} label="Visits" active={pathname === '/visits'} />
           <SidebarItem to="/duplicates" icon={UserPlus} label="Duplicates" active={pathname === '/duplicates'} />
+          <SidebarItem to="/employees" icon={Users} label="Employees" active={pathname === '/employees'} />
         </nav>
 
         <div className="p-4 border-t space-y-2">
@@ -146,6 +148,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/visits" element={<Visits />} />
             <Route path="/duplicates" element={<Duplicates />} />
+            <Route path="/employees" element={<Employees />} />
             <Route path="*" element={<Dashboard />} />
           </Routes>
         </Layout>

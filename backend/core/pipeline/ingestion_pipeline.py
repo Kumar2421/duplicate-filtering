@@ -106,6 +106,7 @@ class IngestionPipeline:
                 "customerId": str(visit_ctx["customerId"]),
                 "branchId": str(visit_ctx["branchId"]),
                 "date": str(visit_ctx["date"]),
+                "isEmployee": visit_ctx.get("isEmployee", False),
                 "eventId": str(img.eventId) if img.eventId else None,
                 "imageType": img.imageType,
                 "url": img.url,

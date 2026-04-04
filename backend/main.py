@@ -17,6 +17,37 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 import numpy as np
 import httpx
+import uuid
+import base64
+
+
+def _load_dotenv_file(file_path: str):
+    try:
+        p = Path(file_path)
+        if not p.exists() or not p.is_file():
+            return
+
+        for raw_line in p.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if not k:
+                continue
+            # Don't overwrite already-set env vars (PM2 env / shell exports win)
+            os.environ.setdefault(k, v)
+    except Exception:
+        # Keep startup resilient; env file is optional.
+        return
+
+
+# Load env from a dotenv-style file early (before config + service init)
+_DEFAULT_ENV_FILE = str(Path(__file__).resolve().parents[1] / "ecosystem.prod.config.js")
+_load_dotenv_file(os.getenv("ENV_FILE", _DEFAULT_ENV_FILE))
 
 class DeleteEventRequest(BaseModel):
     branchId: Optional[str] = None
@@ -60,6 +91,7 @@ from backend.core.storage.http_downloader import HttpDownloader as ImageDownload
 from backend.utils.cluster_loader import load_clusters, get_flattened_visits, get_filtered_duplicates
 from backend.api.check_enrollment import create_check_enrollment_router
 from backend.core.clustering.similarity import cosine_similarity
+from backend.services.analytics_auth_service import AnalyticsAuthService
 
 # Configuration setup
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -79,14 +111,6 @@ from starlette.responses import Response
 
 class PrivateNetworkMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
-        if request.method == "OPTIONS":
-            response = Response()
-            response.headers["Access-Control-Allow-Origin"] = "*"
-            response.headers["Access-Control-Allow-Methods"] = "*"
-            response.headers["Access-Control-Allow-Headers"] = "*"
-            response.headers["Access-Control-Allow-Private-Network"] = "true"
-            return response
-        
         response = await call_next(request)
         response.headers["Access-Control-Allow-Private-Network"] = "true"
         return response
@@ -94,13 +118,22 @@ class PrivateNetworkMiddleware(BaseHTTPMiddleware):
 # Initialization logics
 app = FastAPI(title="Duplicate Detection Platform Middleware")
 
+convert_jobs = {}
+
 # Add Private Network Access Middleware BEFORE CORS
 app.add_middleware(PrivateNetworkMiddleware)
 
 # CORS middleware for React
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In prod, restrict this to React origin
+    # NOTE: allow_credentials=True cannot be used with allow_origins=['*'].
+    allow_origins=[
+        "https://duplicate.tools.thefusionapps.com",
+        "http://localhost:9002",
+        "http://localhost:5173",
+        "http://127.0.0.1:9002",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -123,13 +156,21 @@ app.mount("/data", StaticFiles(directory=data_root), name="data")
 @app.get("/images/{file_path:path}")
 async def serve_image(file_path: str):
     raw_root_path = Path(raw_root).resolve()
+    # The file_path from URL already contains branchId/date/visitId/filename
     target = (raw_root_path / file_path).resolve()
 
     # Prevent path traversal
     if raw_root_path not in target.parents and target != raw_root_path:
+        logging.error(f"FORBIDDEN ACCESS: {target} is not under {raw_root_path}")
         raise HTTPException(status_code=403, detail="Forbidden")
 
     if not target.exists() or not target.is_file():
+        logging.error(f"IMAGE NOT FOUND: {target}")
+        # List directory to see what's actually there if it's a directory issue
+        if target.parent.exists():
+            logging.error(f"Directory exists. Contents of {target.parent}: {os.listdir(target.parent)}")
+        else:
+            logging.error(f"Parent directory does not exist: {target.parent}")
         raise HTTPException(status_code=404, detail="Image not found")
 
     return FileResponse(str(target))
@@ -159,7 +200,8 @@ api_service = APIService(
     category=config["api"].get("category", "potential"),
     time_range=config["api"].get("timeRange", "0,300,18000"),
     enabled=config["api"].get("enabled", True),
-    configs=config["api"].get("configs", [])
+    configs=config["api"].get("configs", []),
+    auth_service=AnalyticsAuthService(),
 )
 
 # Use one shared QdrantManager/client to avoid "Storage folder already accessed"
@@ -454,7 +496,26 @@ async def run_pipeline_sync():
                 await asyncio.sleep(interval * 60)
                 continue
 
+            # Keep the live APIService in sync with config (even though Option B auth doesn't rely on configs).
+            try:
+                api_service.configs = api_configs
+            except Exception:
+                pass
+
             now_ist = datetime.now(pytz.timezone('Asia/Kolkata'))
+
+            # Real-time continuous ingestion: always sync for today's date.
+            # Per-branch 'startDate' in config is used inside sync_branch only as an initial
+            # lastUpdated baseline when no manifest meta is available.
+            api_configs = current_config["api"].get("configs", [])
+
+            # Drop invalid entries to avoid dead tasks
+            api_configs = [c for c in api_configs if c and str(c.get("branchId") or "").strip()]
+            if not api_configs:
+                logging.warning("PIPELINE: No valid branchId entries found in config.json")
+                await asyncio.sleep(interval * 60)
+                continue
+
             date_str = now_ist.strftime("%Y-%m-%d")
             
             restart_enabled = current_config.get("api", {}).get("restart", False)
@@ -561,18 +622,21 @@ async def ingest_visits(
     """
     global config
     
+    if not payload.branchId or not str(payload.branchId).strip():
+        raise HTTPException(status_code=400, detail="branchId is required")
+
     # Update global config and persist to disk for continuous sync
+    # NOTE: Do NOT persist api_key (Option B uses login + branch switch tokens).
     current_configs = config["api"].get("configs", [])
     existing_cfg = next((c for c in current_configs if c.get("branchId") == payload.branchId), None)
     
     if existing_cfg:
-        existing_cfg["api_key"] = payload.api_key
         # We don't overwrite the date in config to avoid jumping back/forth, 
         # but we use the payload date for the immediate sync below.
+        pass
     else:
         current_configs.append({
             "branchId": payload.branchId,
-            "api_key": payload.api_key,
             "startDate": payload.date
         })
         config["api"]["configs"] = current_configs
@@ -582,7 +646,8 @@ async def ingest_visits(
 
     branch_cfg = {
         "branchId": payload.branchId,
-        "api_key": payload.api_key
+        # Optional manual override (not persisted); if provided, used only for this immediate ingestion.
+        "api_key": payload.api_key,
     }
     
     # Record start time to differentiate from old manifest files
@@ -731,38 +796,80 @@ async def conformation_action(action: ConformationAction):
 
 @app.post("/api/convert")
 async def convert_action(action: ConvertAction):
-    """
-    Proxy to external convert API.
-    """
     branch_id = action.branchId or config["api"].get("branchId", "TMJ-CBE")
-    
-    print(f"DEBUG: Convert action for branch {branch_id}")
-    print(f"DEBUG: Payload: {action.dict()}")
-    
+
     payload = {
         "customerId1": action.customerId1,
         "customerId2": action.customerId2,
         "toEmployee": action.toEmployee
     }
 
-    try:
-        print(f"DEBUG: Calling api_service.send_convert_action with branch_id={branch_id}")
-        result = await api_service.send_convert_action(
-            branch_id=branch_id,
-            payload=payload,
-            api_key_override=action.api_key
-        )
-        print(f"DEBUG: api_service.send_convert_action result: {result}")
-    except Exception as e:
-        print(f"ERROR in convert_action: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+    job_id = str(uuid.uuid4())
+    convert_jobs[job_id] = {
+        "status": "queued",
+        "success": None,
+        "result": None,
+        "error": None,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "branch_id": branch_id,
+    }
 
-    if not result["success"]:
-        raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])
-    
-    return result
+    # Guard against a very common upstream failure mode:
+    # the provided JWT belongs to a different branch than the selected branch.
+    # Upstream often returns a generic 400 ("Errro Occured") for this.
+    token_branch_id = None
+    try:
+        if action.api_key and action.api_key.count('.') >= 2:
+            payload_b64 = action.api_key.split('.')[1]
+            payload_b64 += '=' * (-len(payload_b64) % 4)
+            payload_json = base64.urlsafe_b64decode(payload_b64.encode('utf-8')).decode('utf-8')
+            payload_obj = json.loads(payload_json)
+            token_branch_id = payload_obj.get('branchData', {}).get('branchId')
+    except Exception:
+        token_branch_id = None
+
+    if token_branch_id and token_branch_id != branch_id:
+        convert_jobs[job_id]["status"] = "error"
+        convert_jobs[job_id]["success"] = False
+        convert_jobs[job_id]["error"] = f"API key belongs to branch '{token_branch_id}' but you selected '{branch_id}'. Please use the correct branch API key."
+        return {"success": True, "jobId": job_id, "status": "error"}
+
+    async def _run_convert_job():
+        convert_jobs[job_id]["status"] = "running"
+        try:
+            result = await api_service.send_convert_action(
+                branch_id=branch_id,
+                payload=payload,
+                api_key_override=action.api_key,
+                timeout_seconds=60.0,
+                connect_timeout_seconds=10.0,
+            )
+
+            convert_jobs[job_id]["result"] = result
+            convert_jobs[job_id]["success"] = bool(result.get("success"))
+
+            if result.get("success"):
+                convert_jobs[job_id]["status"] = "success"
+            else:
+                convert_jobs[job_id]["status"] = "error"
+                convert_jobs[job_id]["error"] = result.get("error")
+        except Exception as e:
+            convert_jobs[job_id]["status"] = "error"
+            convert_jobs[job_id]["success"] = False
+            convert_jobs[job_id]["error"] = f"Internal Server Error: {str(e)}"
+
+    # BackgroundTasks runs sync callables after the response is sent; it does not await async callables.
+    # Use asyncio.create_task so the coroutine is actually executed.
+    asyncio.create_task(_run_convert_job())
+    return {"success": True, "jobId": job_id, "status": "queued"}
+
+
+@app.get("/api/convert/status")
+async def convert_status(jobId: str = Query(...)):
+    job = convert_jobs.get(jobId)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 @app.delete("/api/delete-event")
 async def delete_event(action: DeleteEventRequest):
@@ -780,6 +887,35 @@ async def delete_event(action: DeleteEventRequest):
         )
     except Exception as e:
         print(f"ERROR in delete_event: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+    if not result["success"]:
+        raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])
+    
+    return result
+
+class DeepDeleteRequest(BaseModel):
+    branchId: Optional[str] = None
+    customerId: str
+    api_key: Optional[str] = None
+
+@app.delete("/api/deep-delete")
+async def deep_delete(action: DeepDeleteRequest):
+    """
+    Proxy to external deep delete API.
+    """
+    branch_id = action.branchId or config["api"].get("branchId", "TMJ-CBE")
+    
+    try:
+        result = await api_service.send_deep_delete(
+            branch_id=branch_id,
+            customer_id=action.customerId,
+            api_key_override=action.api_key
+        )
+    except Exception as e:
+        print(f"ERROR in deep_delete: {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")

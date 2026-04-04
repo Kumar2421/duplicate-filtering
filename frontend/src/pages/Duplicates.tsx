@@ -1,9 +1,9 @@
 import React, { useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
-import { fetchDuplicateClusters, fetchAvailableDates, sendConvertAction, deleteEvent, BASE_URL } from '../services/api';
+import { fetchDuplicateClusters, fetchAvailableDates, sendConvertAction, fetchConvertJobStatus, deleteEvent, BASE_URL } from '../services/api';
 import { Button } from '../components/ui/button';
-import { Search, MapPin, Check, X, RefreshCw, AlertCircle, Layers, Code, Copy, AlertTriangle } from 'lucide-react';
+import { Search, MapPin, Check, X, RefreshCw, AlertCircle, Layers, Code, Copy, UserCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from '../components/ui/input';
 import { DateSelector } from '../components/DateSelector';
@@ -26,6 +26,7 @@ const Duplicates: React.FC = () => {
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   const [toEmployee, setToEmployee] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [deletingEventKeys, setDeletingEventKeys] = React.useState<Set<string>>(new Set());
   const [apiKey, setApiKey] = React.useState('');
 
   const { data: availableDatesData } = useQuery({
@@ -85,11 +86,36 @@ const Duplicates: React.FC = () => {
         api_key: apiKey
       });
 
-      if (result.success) {
-        toast.success("Conversion request sent");
-        setSelectedCluster(null);
-        setSelectedIds([]);
-        refetch();
+      const jobId = result?.jobId;
+      if (!jobId) {
+        toast.error(result?.error || "Convert job could not be started");
+        return;
+      }
+
+      // Poll job status
+      const startedAt = Date.now();
+      const timeoutMs = 90_000;
+      while (true) {
+        if (Date.now() - startedAt > timeoutMs) {
+          toast.error("Convert is taking too long. Please refresh and check again.");
+          break;
+        }
+
+        await new Promise((r) => setTimeout(r, 1500));
+        const status = await fetchConvertJobStatus(jobId);
+
+        if (status?.status === 'success') {
+          toast.success('Conversion successful');
+          setSelectedCluster(null);
+          setSelectedIds([]);
+          refetch();
+          break;
+        }
+
+        if (status?.status === 'error') {
+          toast.error(status?.error || 'Conversion failed');
+          break;
+        }
       }
     } catch (err) {
       // toast.error handled in service
@@ -109,6 +135,13 @@ const Duplicates: React.FC = () => {
       return;
     }
 
+    const eventKey = `${visitId}:${eventId}`;
+    setDeletingEventKeys(prev => {
+      const next = new Set(prev);
+      next.add(eventKey);
+      return next;
+    });
+
     try {
       const result = await deleteEvent({
         branchId: currentBranch,
@@ -123,6 +156,12 @@ const Duplicates: React.FC = () => {
       }
     } catch (err) {
       // toast.error handled in service
+    } finally {
+      setDeletingEventKeys(prev => {
+        const next = new Set(prev);
+        next.delete(eventKey);
+        return next;
+      });
     }
   };
 
@@ -130,7 +169,12 @@ const Duplicates: React.FC = () => {
     const hasConflictIds = c.visits?.some((v: any) => v.conflictIds && v.conflictIds.length > 0);
     const isConflictType = c.type === 'conflict' || hasConflictIds;
     const hasMultipleVisits = (c.visits?.length || 0) >= 2;
-    const isDuplicateType = c.type === 'duplicate' || hasMultipleVisits;
+    const hasMultipleCustomerIds = (c.customerIds?.length || 0) > 1;
+    const isDuplicateType = c.type === 'duplicate' || hasMultipleVisits || hasMultipleCustomerIds;
+
+    // Filter out ANY cluster that contains an employee, even if it's a duplicate/conflict
+    const hasEmployee = c.visits?.some((v: any) => v.isEmployee === true);
+    if (hasEmployee) return false;
 
     if (!isConflictType && !isDuplicateType) return false;
 
@@ -262,17 +306,13 @@ const Duplicates: React.FC = () => {
                     <div className="flex items-center gap-4">
                       <div className="flex flex-wrap gap-2">
                         {cluster.customerIds?.map((cid: string) => (
-                          <span key={cid} className="text-[10px] font-black bg-slate-900 text-white px-2 py-0.5 rounded-lg uppercase tracking-tighter">
-                            {cid}
-                          </span>
+                          <div key={cid} className="flex items-center gap-1 bg-slate-900 text-white px-2 py-0.5 rounded-lg group/cid">
+                            <span className="text-[10px] font-black uppercase tracking-tighter">
+                              {cid}
+                            </span>
+                          </div>
                         ))}
                       </div>
-                      <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${(cluster.type === 'conflict' || cluster.visits?.some((v: any) => v.conflictIds?.length > 0))
-                        ? 'bg-red-50 text-red-600 border-red-100'
-                        : 'bg-amber-50 text-amber-600 border-amber-100'
-                        }`}>
-                        {(cluster.type === 'conflict' || cluster.visits?.some((v: any) => v.conflictIds?.length > 0)) ? 'Conflict' : 'Duplicate'}
-                      </span>
                       <span className="text-xs font-bold text-slate-400">
                         {cluster.visits?.length || 0} Visits
                       </span>
@@ -290,7 +330,8 @@ const Duplicates: React.FC = () => {
                         <DialogTrigger asChild>
                           <Button
                             size="sm"
-                            className="h-8 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[10px] uppercase px-4 rounded-lg shadow-lg shadow-emerald-100/50"
+                            disabled={cluster.visits?.some((v: any) => v.isEmployee === true)}
+                            className="h-8 bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[10px] uppercase px-4 rounded-lg shadow-lg shadow-emerald-100/50 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             <Check size={12} className="mr-1" />
                             Approve & Convert
@@ -397,34 +438,39 @@ const Duplicates: React.FC = () => {
                               e.stopPropagation();
                               handleDeleteImage(visit.visitId, img.eventId);
                             }}
+                            disabled={deletingEventKeys.has(`${visit.visitId}:${img.eventId}`)}
                             className="absolute top-2 right-2 z-20 p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm shadow-sm"
                             title="Reject/Delete Event"
                           >
-                            <X size={12} />
+                            {deletingEventKeys.has(`${visit.visitId}:${img.eventId}`) ? (
+                              <RefreshCw size={12} className="animate-spin" />
+                            ) : (
+                              <X size={12} />
+                            )}
                           </button>
 
-                          {(visit.conflict || (visit.conflictIds && visit.conflictIds.length > 0)) && (
-                            <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pb-3 backdrop-blur-[1px]">
-                              <div className="flex flex-wrap gap-1">
-                                <span className="bg-red-500 text-white text-[7px] font-black px-1.5 py-0.5 rounded shadow-sm flex items-center gap-1 uppercase tracking-tighter">
-                                  <AlertTriangle size={8} />
-                                  Conflict
+                          <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pb-3 backdrop-blur-[1px]">
+                            <div className="flex flex-wrap gap-1 mb-1">
+                              {visit.isEmployee && (
+                                <span className="bg-blue-500 text-white text-[7px] font-black px-1.5 py-0.5 rounded shadow-sm flex items-center gap-1 uppercase tracking-tighter">
+                                  <UserCircle size={8} />
+                                  Employee
                                 </span>
-                              </div>
-                              {visit.conflictIds && visit.conflictIds.length > 0 && (
-                                <div className="mt-2 space-y-1">
-                                  <p className="text-[7px] font-black text-red-400 uppercase">Conflicts Found:</p>
-                                  <div className="flex flex-wrap gap-1">
-                                    {visit.conflictIds.map((cid: string) => (
-                                      <span key={cid} className="text-[7px] bg-red-500/80 text-white px-1 rounded font-bold">
-                                        {cid.slice(-6)}
-                                      </span>
-                                    ))}
-                                  </div>
-                                </div>
                               )}
                             </div>
-                          )}
+                            {visit.conflictIds && visit.conflictIds.length > 0 && (
+                              <div className="mt-1 space-y-1">
+                                <p className="text-[7px] font-black text-red-400 uppercase">Conflicts Found:</p>
+                                <div className="flex flex-wrap gap-1">
+                                  {visit.conflictIds.map((cid: string) => (
+                                    <span key={cid} className="text-[7px] bg-red-500/80 text-white px-1 rounded font-bold">
+                                      {cid.slice(-6)}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       ));
                     })}
@@ -466,24 +512,49 @@ const Duplicates: React.FC = () => {
             {duplicateGroupsJson ? (
               duplicateGroupsJson.map((group: any, i: number) => (
                 <div key={group.clusterId || i} className="group relative">
-                  <div className="bg-slate-900 rounded-xl p-3 shadow-sm border border-slate-800 hover:border-blue-500/50 transition-colors">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[8px] font-black text-blue-400 uppercase tracking-widest">
-                        Group #{i + 1}
-                      </span>
-                      <span className={`text-[7px] font-black uppercase px-1.5 py-0.5 rounded border ${group.type === 'duplicate' ? 'bg-red-500/10 text-red-400 border-red-500/20' : 'bg-amber-500/10 text-amber-400 border-amber-500/20'}`}>
+                  <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-100 hover:border-blue-500 transition-all">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex flex-col">
+                        <span className="text-[10px] font-black text-blue-600 uppercase tracking-widest">
+                          Cluster ID
+                        </span>
+                        <span className="text-xs font-bold text-slate-900 truncate max-w-[120px]">
+                          {group.clusterId}
+                        </span>
+                      </div>
+                      <span className={`text-[8px] font-black uppercase px-2 py-1 rounded-full border ${group.type === 'duplicate' ? 'bg-amber-50 text-amber-600 border-amber-100' : 'bg-red-50 text-red-600 border-red-100'}`}>
                         {group.type}
                       </span>
                     </div>
-                    <pre className="text-[10px] text-slate-300 font-mono leading-relaxed overflow-x-auto">
-                      {JSON.stringify({
-                        customerIds: group.customerIds,
-                        visitIds: group.visitIds
-                      }, null, 2)}
-                    </pre>
+
+                    <div className="space-y-3">
+                      <div>
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter block mb-1">Customer Profiles</span>
+                        <div className="flex flex-wrap gap-1">
+                          {group.customerIds.map((id: string) => (
+                            <span key={id} className="text-[9px] bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded font-black">
+                              {id}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter block mb-1">Visit History ({group.visitIds.length})</span>
+                        <div className="flex flex-wrap gap-1">
+                          {group.visitIds.map((id: string) => (
+                            <span key={id} className="text-[9px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded font-bold border border-blue-100">
+                              {id}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
                     <button
                       onClick={() => copyToClipboard(JSON.stringify(group, null, 2))}
-                      className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1.5 bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-all shadow-lg"
+                      className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 p-1.5 bg-slate-900 rounded-lg text-white transition-all shadow-lg"
+                      title="Copy JSON"
                     >
                       <Copy className="w-3 h-3" />
                     </button>
