@@ -1,19 +1,23 @@
 import React, { useMemo, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
-import { fetchDuplicateClusters, fetchAvailableDates, deepDelete, BASE_URL } from '../services/api';
+import { fetchDuplicateClusters, fetchAvailableDates, deepDelete, deleteEvent, BASE_URL } from '../services/api';
 import { Button } from '../components/ui/button';
-import { Search, MapPin, RefreshCw, AlertCircle, Code, Copy, UserCircle, Trash2 } from 'lucide-react';
+import { Search, MapPin, RefreshCw, AlertCircle, Code, Copy, UserCircle, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from '../components/ui/input';
 import { DateSelector } from '../components/DateSelector';
 
 const Employees: React.FC = () => {
   const { currentBranch, dateRange, setDateRange } = useAppStore();
+  const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = React.useState('');
   const [showSidebar, setShowSidebar] = React.useState(true);
   const [apiKey, setApiKey] = React.useState('');
   const [deepDeletingCustomerIds, setDeepDeletingCustomerIds] = React.useState<Set<string>>(new Set());
+  const [deletedCustomerIds, setDeletedCustomerIds] = React.useState<Set<string>>(new Set());
+  const [deletingEventKeys, setDeletingEventKeys] = React.useState<Set<string>>(new Set());
+  const [deletedEventKeys, setDeletedEventKeys] = React.useState<Set<string>>(new Set());
 
   const { data: availableDatesData } = useQuery({
     queryKey: ['available-dates', currentBranch],
@@ -54,7 +58,27 @@ const Employees: React.FC = () => {
 
       if (result.success) {
         toast.success("Employee data deleted successfully");
-        refetch();
+        setDeletedCustomerIds(prev => {
+          const next = new Set(prev);
+          next.add(customerId);
+          return next;
+        });
+
+        queryClient.setQueryData(
+          ['duplicate-clusters', currentBranch, dateRange.startDate],
+          (old: any) => {
+            if (!old?.clusters) return old;
+            return {
+              ...old,
+              clusters: old.clusters.map((c: any) => ({
+                ...c,
+                visits: (c.visits || []).map((v: any) =>
+                  v.customerId === customerId ? { ...v, isDeleted: true } : v
+                ),
+              })),
+            };
+          }
+        );
       }
     } catch (err) {
       // toast.error handled in service
@@ -62,6 +86,70 @@ const Employees: React.FC = () => {
       setDeepDeletingCustomerIds(prev => {
         const next = new Set(prev);
         next.delete(customerId);
+        return next;
+      });
+    }
+  };
+
+  const handleDeleteImage = async (visitId: string, eventId: string | null) => {
+    if (!eventId) {
+      return;
+    }
+
+    if (!window.confirm("Are you sure you want to delete this image? This action cannot be undone.")) {
+      return;
+    }
+
+    const eventKey = `${visitId}:${eventId}`;
+    setDeletingEventKeys(prev => {
+      const next = new Set(prev);
+      next.add(eventKey);
+      return next;
+    });
+
+    try {
+      const result = await deleteEvent({
+        branchId: currentBranch,
+        visitId,
+        eventId,
+        api_key: apiKey,
+      });
+
+      if (result.success) {
+        toast.success("Image deleted successfully");
+
+        setDeletedEventKeys(prev => {
+          const next = new Set(prev);
+          next.add(eventKey);
+          return next;
+        });
+
+        queryClient.setQueryData(
+          ['duplicate-clusters', currentBranch, dateRange.startDate],
+          (old: any) => {
+            if (!old?.clusters) return old;
+            return {
+              ...old,
+              clusters: old.clusters.map((c: any) => ({
+                ...c,
+                visits: (c.visits || []).map((v: any) => {
+                  if (v.visitId !== visitId) return v;
+                  const allImages = (v.allImages || []).map((img: any) =>
+                    img.eventId === eventId ? { ...img, isDeleted: true } : img
+                  );
+                  return { ...v, allImages };
+                }),
+              })),
+            };
+          }
+        );
+      }
+    } catch (err) {
+      // toast.error handled in service
+    } finally {
+      setDeletingEventKeys(prev => {
+        const next = new Set(prev);
+        next.delete(eventKey);
         return next;
       });
     }
@@ -203,23 +291,36 @@ const Employees: React.FC = () => {
                     <div className="flex items-center gap-4">
                       <div className="flex flex-wrap gap-2">
                         {cluster.customerIds?.map((cid: string) => (
-                          <div key={cid} className="flex items-center gap-1 bg-slate-900 text-white px-2 py-0.5 rounded-lg group/cid">
-                            <span className="text-[10px] font-black uppercase tracking-tighter">
-                              {cid}
-                            </span>
-                            <button
-                              onClick={() => handleDeepDelete(cid)}
-                              disabled={deepDeletingCustomerIds.has(cid)}
-                              className="ml-1 p-0.5 bg-red-500 hover:bg-red-600 rounded text-white transition-colors"
-                              title="Deep Delete Employee Data"
-                            >
-                              {deepDeletingCustomerIds.has(cid) ? (
-                                <RefreshCw size={8} className="animate-spin" />
-                              ) : (
-                                <Trash2 size={8} />
-                              )}
-                            </button>
-                          </div>
+                          (() => {
+                            const isDeleted =
+                              deletedCustomerIds.has(cid) ||
+                              cluster.visits?.some((v: any) => v.customerId === cid && v.isDeleted);
+
+                            return (
+                              <div key={cid} className="flex items-center gap-1 bg-slate-900 text-white px-2 py-0.5 rounded-lg group/cid">
+                                <span className="text-[10px] font-black uppercase tracking-tighter">
+                                  {cid}
+                                </span>
+                                {isDeleted && (
+                                  <span className="text-[8px] font-black uppercase tracking-tighter bg-red-600 text-white px-1.5 py-0.5 rounded">
+                                    Deleted
+                                  </span>
+                                )}
+                                <button
+                                  onClick={() => handleDeepDelete(cid)}
+                                  disabled={deepDeletingCustomerIds.has(cid) || isDeleted}
+                                  className="ml-1 p-0.5 bg-red-500 hover:bg-red-600 rounded text-white transition-colors"
+                                  title="Deep Delete Employee Data"
+                                >
+                                  {deepDeletingCustomerIds.has(cid) ? (
+                                    <RefreshCw size={8} className="animate-spin" />
+                                  ) : (
+                                    <Trash2 size={8} />
+                                  )}
+                                </button>
+                              </div>
+                            );
+                          })()
                         ))}
                       </div>
                       <span className="text-xs font-bold text-slate-400">
@@ -245,6 +346,40 @@ const Employees: React.FC = () => {
                             onError={(e: any) => e.target.src = 'https://placehold.co/300x400?text=No+Photo'}
                             loading="lazy"
                           />
+
+                          {(() => {
+                            const eventKey = `${visit.visitId}:${img.eventId}`;
+                            const isDeleted = Boolean(img.isDeleted) || deletedEventKeys.has(eventKey);
+                            const canDelete = Boolean(img.eventId) && !isDeleted;
+
+                            return (
+                              <>
+                                {canDelete && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteImage(visit.visitId, img.eventId);
+                                    }}
+                                    disabled={deletingEventKeys.has(eventKey)}
+                                    className="absolute top-2 right-2 z-20 p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm shadow-sm"
+                                    title="Reject/Delete Event"
+                                  >
+                                    {deletingEventKeys.has(eventKey) ? (
+                                      <RefreshCw size={12} className="animate-spin" />
+                                    ) : (
+                                      <X size={12} />
+                                    )}
+                                  </button>
+                                )}
+
+                                {isDeleted && (
+                                  <div className="absolute top-2 left-2 z-20 bg-red-600 text-white text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-lg shadow">
+                                    Deleted
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
 
                           <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pb-3 backdrop-blur-[1px]">
                             <div className="flex flex-wrap gap-1 mb-1">

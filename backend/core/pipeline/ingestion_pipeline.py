@@ -107,6 +107,7 @@ class IngestionPipeline:
                 "branchId": str(visit_ctx["branchId"]),
                 "date": str(visit_ctx["date"]),
                 "isEmployee": visit_ctx.get("isEmployee", False),
+                "isDeleted": visit_ctx.get("isDeleted", False),
                 "eventId": str(img.eventId) if img.eventId else None,
                 "imageType": img.imageType,
                 "url": img.url,
@@ -164,15 +165,9 @@ class IngestionPipeline:
                     self.logger.warning(f"INGESTION: Skipping visit {visit_ctx['visitId']} from {visit_ctx['date']} (Requested: {target_date})")
                     continue
 
-                # Check Layer 2: Qdrant existence
-                # MODIFICATION: If force_reprocess is True, we skip the existence check entirely
-                if not force_reprocess and self.qdrant.visit_exists(
-                    str(visit_ctx["branchId"]),
-                    str(visit_ctx["date"]),
-                    str(visit_ctx["visitId"])
-                ):
-                    self.logger.info(f"INGESTION: Skipping existing visit {visit_ctx['visitId']} for {visit_ctx['branchId']} on {visit_ctx['date']}")
-                    continue
+                # NOTE: Do NOT skip an entire visit based on existence.
+                # Visits can receive new events/images over time; we dedupe at the event/image level
+                # using Qdrant eventId checks and stable point IDs.
 
                 metrics.total_visits_processed += 1
 

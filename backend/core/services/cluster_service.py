@@ -20,7 +20,133 @@ class ClusterService:
         self.classifier = ClusterClassifier()
         self.logger = logging.getLogger(__name__)
 
-    async def get_clusters_for_date(self, branch_id: str, date: str, existing_data: Optional[Dict[str, Any]] = None, force_reprocess: bool = False, total_api_visits: int = 0) -> Dict[str, Any]:
+    def _cosine(self, a: np.ndarray, b: np.ndarray) -> float:
+        na = float(np.linalg.norm(a))
+        nb = float(np.linalg.norm(b))
+        if na == 0.0 or nb == 0.0:
+            return -1.0
+        return float(np.dot(a / na, b / nb))
+
+    def _pick_primary_point(self, pts: List[Any]) -> Optional[Any]:
+        primary_candidates: List[Any] = []
+        for p in pts:
+            payload = p.payload or {}
+            is_primary = payload.get("isPrimary")
+            image_type = payload.get("imageType")
+            if is_primary is True or str(image_type) == "primary":
+                primary_candidates.append(p)
+
+        if not primary_candidates:
+            return None
+
+        def _q(p: Any) -> float:
+            payload = p.payload or {}
+            q = payload.get("quality")
+            try:
+                return float(q) if q is not None else 0.0
+            except Exception:
+                return 0.0
+
+        primary_candidates.sort(key=_q, reverse=True)
+        return primary_candidates[0]
+
+    def _build_visit_vectors_from_points(self, points: List[Any], *, threshold: float) -> List[Dict[str, Any]]:
+        top_k = int(getattr(settings, "MAX_PER_VISIT", 5))
+        if top_k <= 0:
+            top_k = 5
+
+        intra_visit_threshold = float(getattr(settings, "INTRA_VISIT_THRESHOLD", threshold))
+
+        by_visit: Dict[str, List[Any]] = {}
+        for p in points:
+            payload = p.payload or {}
+            visit_id = payload.get("visitId")
+            if visit_id is None:
+                continue
+            by_visit.setdefault(str(visit_id), []).append(p)
+
+        visits: List[Dict[str, Any]] = []
+        for visit_id, pts in by_visit.items():
+            # Choose primary as the identity anchor for this visit.
+            # This protects against a visit containing multiple people (wrong face picked on some events).
+            primary_point = self._pick_primary_point(pts)
+
+            # Fallback: if primary missing, use best quality point.
+            if primary_point is None:
+                best_q = -1.0
+                for p in pts:
+                    if p.vector is None:
+                        continue
+                    payload = p.payload or {}
+                    q = payload.get("quality")
+                    try:
+                        qf = float(q) if q is not None else 0.0
+                    except Exception:
+                        qf = 0.0
+                    if qf > best_q:
+                        best_q = qf
+                        primary_point = p
+
+            if primary_point is None or primary_point.vector is None:
+                continue
+
+            primary_vec = np.array(primary_point.vector, dtype=np.float32)
+
+            accepted: List[tuple[float, Any]] = []
+            for p in pts:
+                if p.vector is None:
+                    continue
+                payload = p.payload or {}
+                q = payload.get("quality")
+                try:
+                    qf = float(q) if q is not None else 0.0
+                except Exception:
+                    qf = 0.0
+
+                cand_vec = np.array(p.vector, dtype=np.float32)
+                sim = self._cosine(primary_vec, cand_vec)
+
+                # Always keep the primary point itself; otherwise only keep points consistent with primary.
+                if p is primary_point or sim >= intra_visit_threshold:
+                    accepted.append((qf, p))
+
+            if not accepted:
+                continue
+
+            accepted.sort(key=lambda t: t[0], reverse=True)
+            selected = accepted[:top_k]
+
+            vectors = [np.array(p.vector, dtype=np.float32) for _, p in selected]
+            vec = np.mean(vectors, axis=0)
+            n = float(np.linalg.norm(vec))
+            if n > 0:
+                vec = vec / n
+
+            rep_point = primary_point
+            payload = rep_point.payload or {}
+
+            visits.append(
+                {
+                    "groupId": payload.get("groupId") or payload.get("visitId"),
+                    "visitId": payload.get("visitId"),
+                    "customerId": payload.get("customerId"),
+                    "branchId": payload.get("branchId"),
+                    "date": payload.get("date"),
+                    "isEmployee": payload.get("isEmployee", False),
+                    "image": payload.get("webPath") or payload.get("url"),
+                    "refImage": payload.get("rawVisit", {}).get("refImage") if isinstance(payload.get("rawVisit"), dict) else payload.get("refImage"),
+                    "anchorId": payload.get("anchorId"),
+                    "eventId": payload.get("eventId"),
+                    "entryEventIds": payload.get("entryEventIds") or [],
+                    "exitEventIds": payload.get("exitEventIds") or [],
+                    "isDeleted": payload.get("isDeleted", False),
+                    "vector": vec,
+                }
+            )
+
+        return visits
+
+    async def get_clusters_for_date(self, branch_id: str, date: str, existing_data: Optional[Dict[str, Any]] = None, force_reprocess: bool = False, total_api_visits: int = 0, threshold: Optional[float] = None) -> Dict[str, Any]:
         """
         Fetch embeddings from Qdrant, build visit vectors, cluster, and classify.
         Supports incremental updates by merging with existing_data.
@@ -63,17 +189,11 @@ class ClusterService:
                 }
             }
 
-        # Step 2: Filter to primary anchors only, then group by groupId
-        anchor_points = []
-        for p in points:
-            payload = p.payload or {}
-            is_primary = payload.get("isPrimary")
-            image_type = payload.get("imageType")
-            if is_primary is True or str(image_type) == "primary":
-                anchor_points.append(p)
-
-        if not anchor_points:
-            self.logger.warning(f"No anchor points found for branchId={branch_id}, date={date}. Total points={len(points)}")
+        effective_threshold = float(threshold) if threshold is not None else float(self.engine.threshold)
+        self.engine.threshold = effective_threshold
+        final_groups = self._build_visit_vectors_from_points(points, threshold=effective_threshold)
+        if not final_groups:
+            self.logger.warning(f"No usable visit vectors found for branchId={branch_id}, date={date}. Total points={len(points)}")
             return existing_data or {
                 "branchId": branch_id,
                 "date": date,
@@ -86,36 +206,6 @@ class ClusterService:
                     "lastUpdated": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
                 },
             }
-
-        groups: Dict[str, Dict[str, Any]] = {}
-        for p in anchor_points:
-            payload = p.payload or {}
-            gid = payload.get("groupId") or payload.get("visitId")
-            if not gid:
-                continue
-
-            if gid not in groups:
-                groups[gid] = {
-                    "groupId": str(gid),
-                    "visitId": payload.get("visitId"),
-                    "customerId": payload.get("customerId"),
-                    "branchId": payload.get("branchId"),
-                    "date": payload.get("date"),
-                    "isEmployee": payload.get("isEmployee", False),
-                    "image": payload.get("webPath") or payload.get("url"),
-                    "refImage": payload.get("rawVisit", {}).get("refImage") or payload.get("refImage"),
-                    "anchorId": payload.get("anchorId"),
-                    "eventId": payload.get("eventId"),
-                    "entryEventIds": payload.get("entryEventIds") or [],
-                    "exitEventIds": payload.get("exitEventIds") or [],
-                    "isDeleted": payload.get("isDeleted", False),
-                    "vector": None,
-                }
-
-            if p.vector is not None and groups[gid]["vector"] is None:
-                groups[gid]["vector"] = np.array(p.vector, dtype=np.float32)
-
-        final_groups = [g for g in groups.values() if g.get("vector") is not None]
 
         # Step 3: Incremental Clustering (clusters will contain visits/groups)
         existing_clusters = existing_data.get("clusters", []) if existing_data else []

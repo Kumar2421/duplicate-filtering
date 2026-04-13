@@ -23,6 +23,6 @@ module.exports = {
     },
     autorestart: true,
     watch: false,
-    max_memory_restart: '2G'
+    max_memory_restart: '4G'
   }]
 };

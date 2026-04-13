@@ -386,7 +386,7 @@ async def compare_faces(payload: CompareFacesRequest):
     }
 
 # Add a simple background task runner for sync
-async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool):
+async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, model_threshold: Optional[float] = None):
     """Processes a single branch: ingest new visits and update clusters."""
     b_id = branch_cfg.get("branchId")
     api_key_override = branch_cfg.get("api_key")
@@ -428,7 +428,11 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool):
         
         last_updated = None
         if not restart_enabled:
-            if existing_data and "meta" in existing_data:
+            # Prefer persisted cursor over manifest meta (meta can change for reasons unrelated to upstream updates).
+            last_updated = api_service.load_last_updated_cursor(b_id, date_str)
+
+            # Backwards-compat: if no cursor yet, fall back to manifest meta.
+            if not last_updated and existing_data and "meta" in existing_data:
                 last_updated = existing_data["meta"].get("lastUpdated")
         
         # If still no last_updated, check if branch-specific startDate exists
@@ -442,6 +446,8 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool):
         day_visits_all = await api_service.fetch_visits_for_date(b_id, date_str, api_key_override=api_key_override)
         total_api_visits = len(day_visits_all)
 
+        max_processed_updated_at = None
+
         async for new_visits in api_service.fetch_incremental_pages(b_id, date_str, last_updated, api_key_override=api_key_override):
             logging.info(f"PIPELINE: Processing {len(new_visits)} new visits for {b_id} on {date_str}")
             
@@ -451,6 +457,15 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool):
             ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id)
             logging.info(f"PIPELINE: Ingestion completed for {b_id} - {ingest_res.get('metrics')} - Upserted {ingest_res.get('upserted_count', 0)} points")
 
+            # Advance cursor based on upstream visit.updatedAt (UTC ISO8601).
+            # This keeps polling incremental and avoids reprocessing the same pages.
+            for v in new_visits:
+                v_updated_at = v.get("updatedAt")
+                if not v_updated_at:
+                    continue
+                if max_processed_updated_at is None or str(v_updated_at) > str(max_processed_updated_at):
+                    max_processed_updated_at = str(v_updated_at)
+
             # 4. Identity Resolution (Clustering)
             latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
             
@@ -459,12 +474,16 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool):
                 date=date_str, 
                 existing_data=latest_manifest,
                 total_api_visits=total_api_visits,
-                force_reprocess=restart_enabled
+                force_reprocess=restart_enabled,
+                threshold=model_threshold,
             )
             
             cluster_writer.save_visit_clusters(b_id, date_str, cluster_res)
             logging.info(f"PIPELINE: Clustering updated for {b_id} - {cluster_res.get('meta')}")
             pages_processed += 1
+
+        if not restart_enabled and max_processed_updated_at:
+            api_service.save_last_updated_cursor(b_id, date_str, max_processed_updated_at)
 
         if pages_processed == 0:
             logging.info(f"PIPELINE: No new visits found for {b_id} on {date_str}")
@@ -520,8 +539,14 @@ async def run_pipeline_sync():
             
             restart_enabled = current_config.get("api", {}).get("restart", False)
 
+            model_threshold = None
+            try:
+                model_threshold = float(current_config.get("model", {}).get("threshold"))
+            except Exception:
+                model_threshold = None
+
             # Process all branches in parallel
-            tasks = [sync_branch(cfg, date_str, restart_enabled) for cfg in api_configs]
+            tasks = [sync_branch(cfg, date_str, restart_enabled, model_threshold) for cfg in api_configs]
             
             # Use return_exceptions=True to prevent one branch failure from blocking others
             results = await asyncio.gather(*tasks, return_exceptions=True)

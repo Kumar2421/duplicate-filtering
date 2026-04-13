@@ -310,6 +310,11 @@ const Duplicates: React.FC = () => {
                             <span className="text-[10px] font-black uppercase tracking-tighter">
                               {cid}
                             </span>
+                            {cluster.visits?.some((v: any) => v.customerId === cid && v.isDeleted) && (
+                              <span className="text-[8px] font-black uppercase tracking-tighter bg-red-600 text-white px-1.5 py-0.5 rounded">
+                                Deleted
+                              </span>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -433,21 +438,23 @@ const Duplicates: React.FC = () => {
                             loading="lazy"
                           />
 
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteImage(visit.visitId, img.eventId);
-                            }}
-                            disabled={deletingEventKeys.has(`${visit.visitId}:${img.eventId}`)}
-                            className="absolute top-2 right-2 z-20 p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm shadow-sm"
-                            title="Reject/Delete Event"
-                          >
-                            {deletingEventKeys.has(`${visit.visitId}:${img.eventId}`) ? (
-                              <RefreshCw size={12} className="animate-spin" />
-                            ) : (
-                              <X size={12} />
-                            )}
-                          </button>
+                          {img.eventId && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteImage(visit.visitId, img.eventId);
+                              }}
+                              disabled={deletingEventKeys.has(`${visit.visitId}:${img.eventId}`)}
+                              className="absolute top-2 right-2 z-20 p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm shadow-sm"
+                              title="Reject/Delete Event"
+                            >
+                              {deletingEventKeys.has(`${visit.visitId}:${img.eventId}`) ? (
+                                <RefreshCw size={12} className="animate-spin" />
+                              ) : (
+                                <X size={12} />
+                              )}
+                            </button>
+                          )}
 
                           <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pb-3 backdrop-blur-[1px]">
                             <div className="flex flex-wrap gap-1 mb-1">

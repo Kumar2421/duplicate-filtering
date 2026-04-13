@@ -5,7 +5,7 @@ import logging
 import pytz
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional, AsyncGenerator, Set
+from typing import List, Dict, Any, Optional, AsyncGenerator
 from backend.utils.normalizer import normalize_visit_data, fetch_and_prepare
 from backend.services.analytics_auth_service import AnalyticsAuthService
 
@@ -64,26 +64,33 @@ class APIService:
                 return cfg.get("api_key")
         return None
 
-    def _get_state_file(self, branch_id: str, date_str: str) -> str:
-        return os.path.join(self.state_dir, f"seen_visits_{branch_id}_{date_str}.json")
+    def _get_cursor_file(self, branch_id: str, date_str: str) -> str:
+        return os.path.join(self.state_dir, f"cursor_{branch_id}_{date_str}.json")
 
-    def _load_seen_visits(self, branch_id: str, date_str: str) -> Set[str]:
-        state_file = self._get_state_file(branch_id, date_str)
-        if os.path.exists(state_file):
-            try:
-                with open(state_file, 'r') as f:
-                    return set(json.load(f))
-            except Exception as e:
-                self.logger.error(f"Error loading seen visits: {e}")
-        return set()
-
-    def _save_seen_visits(self, branch_id: str, date_str: str, seen_ids: Set[str]):
-        state_file = self._get_state_file(branch_id, date_str)
+    def load_last_updated_cursor(self, branch_id: str, date_str: str) -> Optional[str]:
+        """Load last_updated cursor for incremental polling (UTC ISO8601 string ending with Z)."""
+        cursor_file = self._get_cursor_file(branch_id, date_str)
+        if not os.path.exists(cursor_file):
+            return None
         try:
-            with open(state_file, 'w') as f:
-                json.dump(list(seen_ids), f)
+            with open(cursor_file, "r") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                v = data.get("last_updated")
+                return str(v) if v else None
+            return None
         except Exception as e:
-            self.logger.error(f"Error saving seen visits: {e}")
+            self.logger.error(f"Error loading cursor file {cursor_file}: {e}")
+            return None
+
+    def save_last_updated_cursor(self, branch_id: str, date_str: str, last_updated: str) -> None:
+        """Persist last_updated cursor for incremental polling."""
+        cursor_file = self._get_cursor_file(branch_id, date_str)
+        try:
+            with open(cursor_file, "w") as f:
+                json.dump({"last_updated": last_updated}, f)
+        except Exception as e:
+            self.logger.error(f"Error saving cursor file {cursor_file}: {e}")
 
     async def fetch_page(
         self,
