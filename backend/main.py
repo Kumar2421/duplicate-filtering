@@ -385,111 +385,122 @@ async def compare_faces(payload: CompareFacesRequest):
         "model_meta": {"name": config["model"]["name"], "threshold": th},
     }
 
+# Global tracking for sync tasks to prevent overlaps
+active_sync_tasks = set()  # Set of (branchId, date)
+sync_semaphore = asyncio.Semaphore(2) # Limit parallel branch syncs to 2 to save resources
+
 # Add a simple background task runner for sync
 async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, model_threshold: Optional[float] = None):
     """Processes a single branch: ingest new visits and update clusters."""
     b_id = branch_cfg.get("branchId")
-    api_key_override = branch_cfg.get("api_key")
     if not b_id:
         return
 
-    logging.info(f"PIPELINE: Syncing branch {b_id} for {date_str}")
-    try:
-        # If restart is enabled, wipe existing data for this branch and date
-        if restart_enabled:
-            logging.info(f"PIPELINE: Restart enabled. Wiping ALL data for {b_id} on {date_str}")
-            # 1. Clear Qdrant points for this branch and date
-            try:
-                from qdrant_client.http import models as q_models
-                qdrant_manager.client.delete(
-                    collection_name=qdrant_manager.collection_name,
-                    points_selector=q_models.Filter(
-                        must=[
-                            q_models.FieldCondition(key="branchId", match=q_models.MatchValue(value=str(b_id))),
-                            q_models.FieldCondition(key="date", match=q_models.MatchValue(value=str(date_str))),
-                        ]
+    task_key = (b_id, date_str)
+    if task_key in active_sync_tasks:
+        logging.info(f"PIPELINE: Sync already in progress for {b_id} on {date_str}. Skipping.")
+        return
+
+    async with sync_semaphore:
+        active_sync_tasks.add(task_key)
+        try:
+            api_key_override = branch_cfg.get("api_key")
+            logging.info(f"PIPELINE: Syncing branch {b_id} for {date_str}")
+            
+            # If restart is enabled, wipe existing data for this branch and date
+            if restart_enabled:
+                logging.info(f"PIPELINE: Restart enabled. Wiping ALL data for {b_id} on {date_str}")
+                # 1. Clear Qdrant points for this branch and date
+                try:
+                    from qdrant_client.http import models as q_models
+                    qdrant_manager.client.delete(
+                        collection_name=qdrant_manager.collection_name,
+                        points_selector=q_models.Filter(
+                            must=[
+                                q_models.FieldCondition(key="branchId", match=q_models.MatchValue(value=str(b_id))),
+                                q_models.FieldCondition(key="date", match=q_models.MatchValue(value=str(date_str))),
+                            ]
+                        )
                     )
+                    await asyncio.sleep(1)
+                except Exception as q_err:
+                    logging.error(f"Error wiping Qdrant for {b_id}: {q_err}")
+
+                # 2. Deep Wipe Local Directories (Processed AND Raw)
+                import shutil
+                from pathlib import Path
+                for folder in ["processed", "raw"]:
+                    target_dir = Path(get_data_root()) / folder / str(b_id) / str(date_str)
+                    if target_dir.exists():
+                        shutil.rmtree(target_dir)
+                        logging.info(f"Deep Wiped {folder} dir: {target_dir}")
+
+            # 1. Load existing cluster manifest to get lastUpdated
+            existing_data = cluster_writer.load_visit_clusters(b_id, date_str)
+            
+            last_updated = None
+            if not restart_enabled:
+                # Prefer persisted cursor over manifest meta (meta can change for reasons unrelated to upstream updates).
+                last_updated = api_service.load_last_updated_cursor(b_id, date_str)
+
+                # Backwards-compat: if no cursor yet, fall back to manifest meta.
+                if not last_updated and existing_data and "meta" in existing_data:
+                    last_updated = existing_data["meta"].get("lastUpdated")
+            
+            # If still no last_updated, check if branch-specific startDate exists
+            if not last_updated:
+                last_updated_str = branch_cfg.get("startDate")
+                if last_updated_str:
+                    last_updated = f"{last_updated_str}T00:00:00.000Z"
+            
+            # 2. Fetch new visits from API page by page and process immediately
+            pages_processed = 0
+            day_visits_all = await api_service.fetch_visits_for_date(b_id, date_str, api_key_override=api_key_override)
+            total_api_visits = len(day_visits_all)
+
+            max_processed_updated_at = None
+
+            async for new_visits in api_service.fetch_incremental_pages(b_id, date_str, last_updated, api_key_override=api_key_override):
+                logging.info(f"PIPELINE: Processing {len(new_visits)} new visits for {b_id} on {date_str}")
+                
+                # 3. Ingest (Embeddings -> Qdrant)
+                ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id)
+                logging.info(f"PIPELINE: Ingestion completed for {b_id} - {ingest_res.get('metrics')} - Upserted {ingest_res.get('upserted_count', 0)} points")
+
+                # Advance cursor based on upstream visit.updatedAt (UTC ISO8601).
+                for v in new_visits:
+                    v_updated_at = v.get("updatedAt")
+                    if not v_updated_at:
+                        continue
+                    if max_processed_updated_at is None or str(v_updated_at) > str(max_processed_updated_at):
+                        max_processed_updated_at = str(v_updated_at)
+
+                # 4. Identity Resolution (Clustering)
+                latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
+                
+                cluster_res = await cluster_service.get_clusters_for_date(
+                    branch_id=b_id, 
+                    date=date_str, 
+                    existing_data=latest_manifest,
+                    total_api_visits=total_api_visits,
+                    force_reprocess=restart_enabled,
+                    threshold=model_threshold,
                 )
-                await asyncio.sleep(1)
-            except Exception as q_err:
-                logging.error(f"Error wiping Qdrant for {b_id}: {q_err}")
+                
+                cluster_writer.save_visit_clusters(b_id, date_str, cluster_res)
+                logging.info(f"PIPELINE: Clustering updated for {b_id} - {cluster_res.get('meta')}")
+                pages_processed += 1
 
-            # 2. Deep Wipe Local Directories (Processed AND Raw)
-            import shutil
-            from pathlib import Path
-            for folder in ["processed", "raw"]:
-                target_dir = Path(get_data_root()) / folder / str(b_id) / str(date_str)
-                if target_dir.exists():
-                    shutil.rmtree(target_dir)
-                    logging.info(f"Deep Wiped {folder} dir: {target_dir}")
+            if not restart_enabled and max_processed_updated_at:
+                api_service.save_last_updated_cursor(b_id, date_str, max_processed_updated_at)
 
-        # 1. Load existing cluster manifest to get lastUpdated
-        existing_data = cluster_writer.load_visit_clusters(b_id, date_str)
-        
-        last_updated = None
-        if not restart_enabled:
-            # Prefer persisted cursor over manifest meta (meta can change for reasons unrelated to upstream updates).
-            last_updated = api_service.load_last_updated_cursor(b_id, date_str)
+            if pages_processed == 0:
+                logging.info(f"PIPELINE: No new visits found for {b_id} on {date_str}")
 
-            # Backwards-compat: if no cursor yet, fall back to manifest meta.
-            if not last_updated and existing_data and "meta" in existing_data:
-                last_updated = existing_data["meta"].get("lastUpdated")
-        
-        # If still no last_updated, check if branch-specific startDate exists
-        if not last_updated:
-            last_updated_str = branch_cfg.get("startDate")
-            if last_updated_str:
-                last_updated = f"{last_updated_str}T00:00:00.000Z"
-        
-        # 2. Fetch new visits from API page by page and process immediately
-        pages_processed = 0
-        day_visits_all = await api_service.fetch_visits_for_date(b_id, date_str, api_key_override=api_key_override)
-        total_api_visits = len(day_visits_all)
-
-        max_processed_updated_at = None
-
-        async for new_visits in api_service.fetch_incremental_pages(b_id, date_str, last_updated, api_key_override=api_key_override):
-            logging.info(f"PIPELINE: Processing {len(new_visits)} new visits for {b_id} on {date_str}")
-            
-            # 3. Ingest (Embeddings -> Qdrant)
-            # Use the shared executor but don't create a new event loop inside the worker
-            # The ingestion_pipeline.process_visits is an async function, so we should run it in the loop
-            ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id)
-            logging.info(f"PIPELINE: Ingestion completed for {b_id} - {ingest_res.get('metrics')} - Upserted {ingest_res.get('upserted_count', 0)} points")
-
-            # Advance cursor based on upstream visit.updatedAt (UTC ISO8601).
-            # This keeps polling incremental and avoids reprocessing the same pages.
-            for v in new_visits:
-                v_updated_at = v.get("updatedAt")
-                if not v_updated_at:
-                    continue
-                if max_processed_updated_at is None or str(v_updated_at) > str(max_processed_updated_at):
-                    max_processed_updated_at = str(v_updated_at)
-
-            # 4. Identity Resolution (Clustering)
-            latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
-            
-            cluster_res = await cluster_service.get_clusters_for_date(
-                branch_id=b_id, 
-                date=date_str, 
-                existing_data=latest_manifest,
-                total_api_visits=total_api_visits,
-                force_reprocess=restart_enabled,
-                threshold=model_threshold,
-            )
-            
-            cluster_writer.save_visit_clusters(b_id, date_str, cluster_res)
-            logging.info(f"PIPELINE: Clustering updated for {b_id} - {cluster_res.get('meta')}")
-            pages_processed += 1
-
-        if not restart_enabled and max_processed_updated_at:
-            api_service.save_last_updated_cursor(b_id, date_str, max_processed_updated_at)
-
-        if pages_processed == 0:
-            logging.info(f"PIPELINE: No new visits found for {b_id} on {date_str}")
-
-    except Exception as b_err:
-        logging.error(f"PIPELINE ERROR for branch {b_id}: {b_err}")
+        except Exception as b_err:
+            logging.error(f"PIPELINE ERROR for branch {b_id}: {b_err}")
+        finally:
+            active_sync_tasks.discard(task_key)
 
 async def run_pipeline_sync():
     """

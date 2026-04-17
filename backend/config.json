@@ -5,27 +5,27 @@
     "configs": [
       {
         "branchId": "CBE-TRS",
-        "startDate": "2026-04-07"
+        "startDate": "2026-04-17"
       },
       {
         "branchId": "CBE-TITAN",
-        "startDate": "2026-04-07"
+        "startDate": "2026-04-17"
       },
       {
         "branchId": "EA-NATURALS",
-        "startDate": "2026-04-07"
+        "startDate": "2026-04-17"
       },
       {
         "branchId": "GT-CBE",
-        "startDate": "2026-04-07"
+        "startDate": "2026-04-17"
       },
       {
         "branchId": "TMJ-CBE",
-        "startDate": "2026-04-07"
+        "startDate": "2026-04-17"
       },
       {
         "branchId": "GT-ODISHA",
-        "startDate": "2026-04-07"
+        "startDate": "2026-04-17"
       }
     ],
     "category": "all",

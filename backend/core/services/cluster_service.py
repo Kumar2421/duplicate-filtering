@@ -33,7 +33,11 @@ class ClusterService:
             payload = p.payload or {}
             is_primary = payload.get("isPrimary")
             image_type = payload.get("imageType")
-            if is_primary is True or str(image_type) == "primary":
+            # Important: during ingestion we may mark a non-primary event as isPrimary=True when splitting
+            # multiple faces into separate groups within a visit.
+            # For cross-visit identity resolution, only treat a point as "primary" if it is truly the
+            # dedicated primary image type. Otherwise we risk anchoring on a weak/off-angle event frame.
+            if str(image_type) == "primary" or (is_primary is True and str(image_type) == "primary"):
                 primary_candidates.append(p)
 
         if not primary_candidates:

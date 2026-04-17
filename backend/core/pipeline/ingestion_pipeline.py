@@ -180,17 +180,52 @@ class IngestionPipeline:
                 # Fetch and store ALL images discovered in the visit
                 urls_to_download = []
                 img_map = {}
+                
+                # Pre-calculate point IDs to check existence in Qdrant
+                img_pids = []
+                img_to_pid = {}
+                img_obj_to_pid = {}
                 for img in images:
+                    pid = make_point_id(
+                        visit_id=str(visit_ctx["visitId"]),
+                        branch_id=str(visit_ctx["branchId"]),
+                        date=str(visit_ctx["date"]),
+                        event_id=str(img.eventId) if img.eventId else None,
+                        image_type=str(img.imageType)
+                    )
+                    img_pids.append(pid)
+                    img_to_pid[img.url] = pid
+                    img_obj_to_pid[id(img)] = pid
+
+                # Check which points already exist in Qdrant to skip embedding extraction
+                existing_pids = set()
+                if not force_reprocess and img_pids:
+                    try:
+                        # Batch check existence in Qdrant
+                        result = self.qdrant.client.retrieve(
+                            collection_name=self.qdrant.collection_name,
+                            ids=img_pids,
+                            with_payload=False,
+                            with_vectors=False
+                        )
+                        existing_pids = {str(p.id) for p in result}
+                        if existing_pids:
+                            self.logger.info(f"INGESTION: Skipping {len(existing_pids)} already processed points for visit {visit_ctx['visitId']}")
+                    except Exception as e:
+                        self.logger.error(f"Error checking point existence: {e}")
+
+                # Only process images whose pointId does not exist in Qdrant.
+                # This is the core optimization to avoid disk reads + ML embedding re-extraction.
+                if force_reprocess:
+                    images_to_process = list(images)
+                else:
+                    images_to_process = [img for img in images if img_obj_to_pid.get(id(img)) not in existing_pids]
+
+                if not images_to_process:
+                    continue
+
+                for img in images_to_process:
                     event_file_id = str(img.eventId) if img.eventId else "primary"
-                    
-                    # WATERMARK CHECK: Skip if eventId already exists in Qdrant for this specific branch/date
-                    if not force_reprocess and img.eventId and self.qdrant.event_exists(
-                        img.eventId, 
-                        str(visit_ctx["branchId"]), 
-                        str(visit_ctx["date"])
-                    ):
-                        self.logger.info(f"INGESTION: Skipping already processed eventId {img.eventId} for {visit_ctx['branchId']} on {visit_ctx['date']}")
-                        continue
 
                     # Check if we already have the original image on disk
                     # MODIFICATION: If force_reprocess is True, we ignore the disk check and force re-download
@@ -223,27 +258,72 @@ class IngestionPipeline:
                 if not primary_img:
                     continue
 
+                primary_pid = make_point_id(
+                    visit_id=str(visit_ctx["visitId"]),
+                    branch_id=str(visit_ctx["branchId"]),
+                    date=str(visit_ctx["date"]),
+                    event_id=None,
+                    image_type="primary",
+                )
+
+                primary_exists = (not force_reprocess) and (primary_pid in existing_pids)
+
+                # Determine if we need to embed primary in this run.
+                # If primary already exists, we should NOT re-embed; instead we will retrieve its vector for anchoring.
+                primary_to_embed = None if primary_exists else primary_img
+
+                # If primary exists but we still have secondary images to process, retrieve the primary vector
+                # so we can compute similarity and grouping without reading/embedding the primary again.
+                primary_vec = None
+                primary_payload_existing = None
+                if primary_exists:
+                    try:
+                        recs = self.qdrant.client.retrieve(
+                            collection_name=self.qdrant.collection_name,
+                            ids=[primary_pid],
+                            with_payload=True,
+                            with_vectors=True,
+                        )
+                        if recs:
+                            rec = recs[0]
+                            primary_payload_existing = getattr(rec, "payload", None)
+                            vec = getattr(rec, "vector", None)
+                            # Qdrant may return vector as list or dict (named vectors)
+                            if isinstance(vec, dict):
+                                vec = next(iter(vec.values()), None)
+                            if isinstance(vec, list):
+                                primary_vec = np.array(vec, dtype=np.float32)
+                    except Exception as e:
+                        self.logger.error(f"Error retrieving primary vector for anchor (pid={primary_pid}): {e}")
+
                 anchor_id = f"{visit_ctx.get('visitId')}_primary"
 
-                # Process primary image for embedding
-                primary_res = await self._process_single_image(
-                    visit_ctx=visit_ctx,
-                    img=primary_img,
-                    metrics=metrics,
-                    dl=None, # Already saved above
-                    extra_payload={
-                        "anchorId": anchor_id,
-                        "isPrimary": True,
-                        "entryEventIds": entry_event_ids,
-                        "exitEventIds": exit_event_ids,
-                        "isDeleted": False
-                    }
-                )
-                if not primary_res:
-                    continue
+                primary_point = None
+                if primary_to_embed is not None:
+                    # Process primary image for embedding (only when primary point is missing)
+                    primary_res = await self._process_single_image(
+                        visit_ctx=visit_ctx,
+                        img=primary_to_embed,
+                        metrics=metrics,
+                        dl=None, # Already saved above
+                        extra_payload={
+                            "anchorId": anchor_id,
+                            "isPrimary": True,
+                            "entryEventIds": entry_event_ids,
+                            "exitEventIds": exit_event_ids,
+                            "isDeleted": False
+                        }
+                    )
+                    if not primary_res:
+                        continue
 
-                _, primary_point = primary_res
-                primary_vec = np.array(primary_point.vector, dtype=np.float32)
+                    _, primary_point = primary_res
+                    primary_vec = np.array(primary_point.vector, dtype=np.float32)
+
+                if primary_vec is None:
+                    # If primary exists but we couldn't retrieve its vector, we can't anchor grouping.
+                    # Avoid expensive fallbacks (disk read + ML) and skip this visit for now.
+                    continue
 
                 matched_group = None
                 for g in active_groups:
@@ -261,11 +341,12 @@ class IngestionPipeline:
                     active_groups.append(matched_group)
 
                 group_id = matched_group["groupId"]
-                primary_point.payload["groupId"] = group_id
-                points_to_store.append(primary_point)
-                matched_group["stored"] += 1
+                if primary_point is not None:
+                    primary_point.payload["groupId"] = group_id
+                    points_to_store.append(primary_point)
+                    matched_group["stored"] += 1
 
-                for i in images:
+                for i in images_to_process:
                     if i is primary_img:
                         continue
                     if int(matched_group["stored"]) >= int(per_group_cap):

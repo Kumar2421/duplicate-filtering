@@ -116,7 +116,6 @@ class APIService:
             "limit": self.limit,
             "category": self.category,
             "timeRange": effective_time_range,
-            "excludeEmployee": "true",
             "excludeSingleEvent": "true",
             "excludeMissedService": "true",
             "isGroup": "true"
