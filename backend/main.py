@@ -7,7 +7,10 @@ import sys
 import pytz
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, Depends, Query, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Depends, Query, BackgroundTasks, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -92,6 +95,7 @@ from backend.utils.cluster_loader import load_clusters, get_flattened_visits, ge
 from backend.api.check_enrollment import create_check_enrollment_router
 from backend.core.clustering.similarity import cosine_similarity
 from backend.services.analytics_auth_service import AnalyticsAuthService
+from backend.core.metrics.processing_metrics import ProcessingMetricsManager
 
 # Configuration setup
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -242,6 +246,8 @@ ingestion_pipeline = IngestionPipeline(
 )
 cluster_writer = JsonClusterWriter()
 cluster_service = ClusterService(qdrant_manager=qdrant_manager)
+# Phase 5: Initialize metrics manager
+metrics_manager = ProcessingMetricsManager()
 
 app.include_router(
     create_check_enrollment_router(
@@ -390,8 +396,11 @@ active_sync_tasks = set()  # Set of (branchId, date)
 sync_semaphore = asyncio.Semaphore(2) # Limit parallel branch syncs to 2 to save resources
 
 # Add a simple background task runner for sync
-async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, model_threshold: Optional[float] = None):
-    """Processes a single branch: ingest new visits and update clusters."""
+async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, model_threshold: Optional[float] = None, deep_sync: bool = False):
+    """
+    Processes a single branch: ingest new visits and update clusters.
+    Phase 5: Now with comprehensive metrics tracking.
+    """
     b_id = branch_cfg.get("branchId")
     if not b_id:
         return
@@ -401,11 +410,14 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, mo
         logging.info(f"PIPELINE: Sync already in progress for {b_id} on {date_str}. Skipping.")
         return
 
+    # Phase 5: Start metrics tracking
+    sync_metrics = metrics_manager.start_sync(b_id, date_str)
+
     async with sync_semaphore:
         active_sync_tasks.add(task_key)
         try:
             api_key_override = branch_cfg.get("api_key")
-            logging.info(f"PIPELINE: Syncing branch {b_id} for {date_str}")
+            logging.info(f"PIPELINE: Syncing branch {b_id} for {date_str} (Deep Sync: {deep_sync})")
             
             # If restart is enabled, wipe existing data for this branch and date
             if restart_enabled:
@@ -436,19 +448,19 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, mo
                         logging.info(f"Deep Wiped {folder} dir: {target_dir}")
 
             # 1. Load existing cluster manifest to get lastUpdated
-            existing_data = cluster_writer.load_visit_clusters(b_id, date_str)
+            latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
             
             last_updated = None
-            if not restart_enabled:
+            if not restart_enabled and not deep_sync:
                 # Prefer persisted cursor over manifest meta (meta can change for reasons unrelated to upstream updates).
                 last_updated = api_service.load_last_updated_cursor(b_id, date_str)
 
                 # Backwards-compat: if no cursor yet, fall back to manifest meta.
-                if not last_updated and existing_data and "meta" in existing_data:
-                    last_updated = existing_data["meta"].get("lastUpdated")
+                if not last_updated and not deep_sync and latest_manifest and "meta" in latest_manifest:
+                    last_updated = latest_manifest["meta"].get("lastUpdated")
             
             # If still no last_updated, check if branch-specific startDate exists
-            if not last_updated:
+            if not last_updated and not deep_sync:
                 last_updated_str = branch_cfg.get("startDate")
                 if last_updated_str:
                     last_updated = f"{last_updated_str}T00:00:00.000Z"
@@ -458,14 +470,71 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, mo
             day_visits_all = await api_service.fetch_visits_for_date(b_id, date_str, api_key_override=api_key_override)
             total_api_visits = len(day_visits_all)
 
+            if deep_sync:
+                logging.info(f"PIPELINE: Deep Sync active for {b_id} on {date_str}. Total API visits to scan: {total_api_visits}")
+
+            # Phase 5: Update metrics with total API visits
+            metrics_manager.update_sync(b_id, date_str, total_api_visits=total_api_visits)
+
             max_processed_updated_at = None
 
-            async for new_visits in api_service.fetch_incremental_pages(b_id, date_str, last_updated, api_key_override=api_key_override):
-                logging.info(f"PIPELINE: Processing {len(new_visits)} new visits for {b_id} on {date_str}")
-                
+            async for new_visits in api_service.fetch_incremental_pages(b_id, date_str, last_updated, api_key_override=api_key_override, deep_sync=deep_sync):
+                logging.info(f"PIPELINE: Processing {len(new_visits)} visits for {b_id} on {date_str} (Deep Sync: {deep_sync})")
+
+                # Phase 5: Update metrics with new visits fetched
+                metrics_manager.update_sync(
+                    b_id, date_str,
+                    new_visits_fetched=sync_metrics.new_visits_fetched + len(new_visits),
+                    api_pages_fetched=sync_metrics.api_pages_fetched + 1
+                )
+
                 # 3. Ingest (Embeddings -> Qdrant)
-                ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id)
+                ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id, deep_sync=deep_sync)
                 logging.info(f"PIPELINE: Ingestion completed for {b_id} - {ingest_res.get('metrics')} - Upserted {ingest_res.get('upserted_count', 0)} points")
+
+                # Patch isEmployee/isDeleted flags in the local JSON manifest if they changed in Qdrant
+                changed_visit_ids = ingest_res.get("visits_with_flags_changed", [])
+                if changed_visit_ids:
+                    # Reload manifest to ensure we are patching the latest state
+                    latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
+                    if latest_manifest:
+                        modified_json = False
+                        # Create a map of the new normalized visits for quick lookup
+                        # new_visits was already normalized inside ingestion_pipeline.process_visits
+                        # but we need to re-normalize or access the already normalized ones
+                        from backend.core.ingestion.visit_normalizer import normalize_visit
+                        new_normalized_map = {str(v.get("id")): normalize_visit(v) for v in new_visits if v.get("id")}
+                        
+                        for cluster in latest_manifest.get("clusters", []):
+                            for visit in cluster.get("visits", []):
+                                vid = str(visit.get("visitId"))
+                                if vid in changed_visit_ids and vid in new_normalized_map:
+                                    norm_v = new_normalized_map[vid]
+                                    
+                                    new_is_employee = norm_v.get("isEmployee", False)
+                                    new_is_deleted = norm_v.get("isDeleted", False)
+                                    
+                                    if visit.get("isEmployee") != new_is_employee or visit.get("isDeleted") != new_is_deleted:
+                                        logging.info(f"PIPELINE: Patching flags for visit {vid}: isEmployee({visit.get('isEmployee')}->{new_is_employee}), isDeleted({visit.get('isDeleted')}->{new_is_deleted})")
+                                        visit["isEmployee"] = new_is_employee
+                                        visit["isDeleted"] = new_is_deleted
+                                        modified_json = True
+                                        
+                        if modified_json:
+                            cluster_writer.save_visit_clusters(b_id, date_str, latest_manifest)
+                            logging.info(f"PIPELINE: Patched {len(changed_visit_ids)} visits in visit-clusters.json for {b_id} on {date_str}")
+
+
+                # Phase 5: Update metrics with ingestion results
+                ing_metrics = ingest_res.get('metrics', {})
+                metrics_manager.update_sync(
+                    b_id, date_str,
+                    images_found=sync_metrics.images_found + ing_metrics.get('total_images_found', 0),
+                    images_downloaded=sync_metrics.images_downloaded + ing_metrics.get('total_images_downloaded', 0),
+                    embeddings_extracted=sync_metrics.embeddings_extracted + ing_metrics.get('total_embeddings_extracted', 0),
+                    points_upserted=sync_metrics.points_upserted + ingest_res.get('upserted_count', 0),
+                    visit_manifests_saved=sync_metrics.visit_manifests_saved + ingest_res.get('visits_processed', 0)
+                )
 
                 # Advance cursor based on upstream visit.updatedAt (UTC ISO8601).
                 for v in new_visits:
@@ -489,6 +558,20 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, mo
                 
                 cluster_writer.save_visit_clusters(b_id, date_str, cluster_res)
                 logging.info(f"PIPELINE: Clustering updated for {b_id} - {cluster_res.get('meta')}")
+
+                # Phase 5: Update clustering metrics
+                cluster_meta = cluster_res.get('meta', {})
+                clusters_list = cluster_res.get('clusters', [])
+                conflicts = sum(1 for c in clusters_list if c.get('type') == 'conflict')
+                duplicates = sum(1 for c in clusters_list if c.get('type') == 'duplicate')
+
+                metrics_manager.update_sync(
+                    b_id, date_str,
+                    clusters_created=len(clusters_list),
+                    conflicts_detected=conflicts,
+                    duplicates_detected=duplicates
+                )
+
                 pages_processed += 1
 
             if not restart_enabled and max_processed_updated_at:
@@ -497,8 +580,13 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, mo
             if pages_processed == 0:
                 logging.info(f"PIPELINE: No new visits found for {b_id} on {date_str}")
 
+            # Phase 5: Mark sync as completed
+            metrics_manager.complete_sync(b_id, date_str, status="completed")
+
         except Exception as b_err:
             logging.error(f"PIPELINE ERROR for branch {b_id}: {b_err}")
+            # Phase 5: Mark sync as failed
+            metrics_manager.complete_sync(b_id, date_str, status="failed", error_message=str(b_err)[:500])
         finally:
             active_sync_tasks.discard(task_key)
 
@@ -546,9 +634,11 @@ async def run_pipeline_sync():
                 await asyncio.sleep(interval * 60)
                 continue
 
-            date_str = now_ist.strftime("%Y-%m-%d")
+            today_str = now_ist.strftime("%Y-%m-%d")
             
             restart_enabled = current_config.get("api", {}).get("restart", False)
+            deep_sync_global = current_config.get("api", {}).get("deep_sync", False)
+            sync_window_days = current_config.get("api", {}).get("syncWindowDays", 3)
 
             model_threshold = None
             try:
@@ -556,11 +646,82 @@ async def run_pipeline_sync():
             except Exception:
                 model_threshold = None
 
-            # Process all branches in parallel
-            tasks = [sync_branch(cfg, date_str, restart_enabled, model_threshold) for cfg in api_configs]
-            
-            # Use return_exceptions=True to prevent one branch failure from blocking others
+            # Phase 3 & 7: Optimized window iteration (Newest first)
+            def _iter_dates(start_date_str: Optional[str], end_date_str: str, limit_days: int = 3, sync_start: Optional[str] = None, sync_end: Optional[str] = None):
+                """
+                Iterate dates. 
+                If sync_start and sync_end are provided, iterate that range.
+                If only sync_start is provided, iterate from sync_start to today.
+                Otherwise, iterate last N days.
+                """
+                try:
+                    today_dt = datetime.strptime(str(end_date_str), "%Y-%m-%d").date()
+                    
+                    if sync_start:
+                        # Use explicit range if provided
+                        start_dt = datetime.strptime(str(sync_start), "%Y-%m-%d").date()
+                        if sync_end:
+                            end_dt = datetime.strptime(str(sync_end), "%Y-%m-%d").date()
+                        else:
+                            end_dt = today_dt
+                    else:
+                        # Default last N days logic
+                        end_dt = today_dt
+                        start_dt = end_dt - timedelta(days=limit_days - 1)
+
+                    cur = end_dt
+                    while cur >= start_dt:
+                        yield cur.strftime("%Y-%m-%d")
+                        cur = cur - timedelta(days=1)
+                except Exception as e:
+                    logging.error(f"PIPELINE: Error in _iter_dates: {e}")
+                    return
+
+            # Phase 3 & 7: Enhanced branch sync with 0-balance skipping
+            async def _sync_branch_range(cfg: dict):
+                """
+                Process last 3 days for a branch. Skip if balance is 0 for previous dates.
+                """
+                branch_id = cfg.get("branchId")
+                today_dt = datetime.now().date()
+                
+                deep_sync_enabled = deep_sync_global or cfg.get("deep_sync", False)
+                restart_branch = restart_enabled or cfg.get("restart", False)
+
+                try:
+                    # Priority for date range:
+                    # 1. Branch-specific syncStartDate/syncEndDate
+                    # 2. Global api.syncStartDate/api.syncEndDate (if we want to add them later)
+                    # 3. Default window-based sync
+                    
+                    s_start = cfg.get("syncStartDate")
+                    s_end = cfg.get("syncEndDate")
+                    
+                    # Strictly last N days or custom range, newest first
+                    dates_to_sync = list(_iter_dates(None, today_str, limit_days=sync_window_days, sync_start=s_start, sync_end=s_end))
+                    logging.info(f"PIPELINE: Branch {branch_id} will sync dates: {dates_to_sync}")
+
+                    for d in dates_to_sync:
+                        # Balance-Aware Skipping for previous dates
+                        if not deep_sync_enabled and not restart_branch and d != today_str:
+                            manifest = cluster_writer.load_visit_clusters(branch_id, d)
+                            if manifest and manifest.get("meta", {}).get("balance") == 0:
+                                logging.info(f"PIPELINE: Skipping {branch_id} for {d} (Balance is 0)")
+                                continue
+
+                        try:
+                            await sync_branch(cfg, d, restart_branch, model_threshold, deep_sync=deep_sync_enabled)
+                        except Exception as date_err:
+                            logging.error(f"PIPELINE: Failed to sync {branch_id} for {d}: {date_err}")
+                            continue
+
+                except Exception as branch_err:
+                    logging.error(f"PIPELINE: Failed to process date range for branch {branch_id}: {branch_err}")
+
+            # Phase 7: Parallel sync across branches
+            tasks = [_sync_branch_range(cfg) for cfg in api_configs]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+
             
             for i, res in enumerate(results):
                 b_id = api_configs[i].get("branchId", "Unknown")
@@ -569,9 +730,16 @@ async def run_pipeline_sync():
                 else:
                     logging.info(f"PIPELINE: Sync completed for branch {b_id}")
 
-            # Reset restart flag after one full cycle
+            # Reset restart/deep_sync flags after one full cycle
+            config_modified = False
             if restart_enabled:
                 current_config["api"]["restart"] = False
+                config_modified = True
+            if current_config.get("api", {}).get("deep_sync", False):
+                current_config["api"]["deep_sync"] = False
+                config_modified = True
+                
+            if config_modified:
                 save_config(current_config)
 
         except Exception as e:
@@ -809,8 +977,79 @@ async def get_available_dates(branchId: str = Query(...)):
                 
     return {"dates": sorted(list(dates), reverse=True)}
 
+# Auth Configuration
+SECRET_KEY = os.getenv("AUTH_SECRET_KEY", "7b22686f73744e616d65223a223130332e3138362e3232312e3230227d")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 7 days
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    return username
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+@app.post("/api/auth/login", response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    admin_user = os.getenv("ADMIN_USERNAME", "admin")
+    admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+    
+    if form_data.username != admin_user or form_data.password != admin_password:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": form_data.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/api/auth/me")
+async def read_users_me(current_user: str = Depends(get_current_user)):
+    return {"username": current_user}
+
+@app.get("/api/auth/branch-token")
+async def get_branch_token(branchId: str, current_user: str = Depends(get_current_user)):
+    """
+    Fetch a branch-specific token from Analytics API (Option B flow).
+    """
+    try:
+        token = await api_service.auth_service.get_branch_token(branchId)
+        return {"branchId": branchId, "token": token}
+    except Exception as e:
+        logger.error(f"Failed to fetch branch token for {branchId}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.put("/api/conformation/action")
-async def conformation_action(action: ConformationAction):
+async def conformation_action(action: ConformationAction, current_user: str = Depends(get_current_user)):
     """
     Proxy to external conformation API and local logging.
     """
@@ -831,7 +1070,7 @@ async def conformation_action(action: ConformationAction):
     return result
 
 @app.post("/api/convert")
-async def convert_action(action: ConvertAction):
+async def convert_action(action: ConvertAction, current_user: str = Depends(get_current_user)):
     branch_id = action.branchId or config["api"].get("branchId", "TMJ-CBE")
 
     payload = {
@@ -899,7 +1138,6 @@ async def convert_action(action: ConvertAction):
     asyncio.create_task(_run_convert_job())
     return {"success": True, "jobId": job_id, "status": "queued"}
 
-
 @app.get("/api/convert/status")
 async def convert_status(jobId: str = Query(...)):
     job = convert_jobs.get(jobId)
@@ -907,8 +1145,55 @@ async def convert_status(jobId: str = Query(...)):
         raise HTTPException(status_code=404, detail="Job not found")
     return job
 
+# Helper for delete statistics
+DELETE_STATS_FILE = os.path.join("data", "state", "delete_stats.json")
+
+def load_delete_stats(branch_id: Optional[str] = None, date_str: Optional[str] = None):
+    if not os.path.exists(DELETE_STATS_FILE):
+        return {"total_deleted": 0, "date_deleted": 0}
+    try:
+        with open(DELETE_STATS_FILE, "r") as f:
+            stats = json.load(f)
+            
+        # Simplified: if branch and date provided, return that specific count
+        if branch_id and date_str:
+            return {
+                "total_deleted": stats.get("total_deleted", 0),
+                "date_deleted": stats.get(branch_id, {}).get(date_str, 0)
+            }
+        return {"total_deleted": stats.get("total_deleted", 0), "date_deleted": 0}
+    except:
+        return {"total_deleted": 0, "date_deleted": 0}
+
+def increment_delete_count(branch_id: str, date_str: str):
+    stats = {}
+    if os.path.exists(DELETE_STATS_FILE):
+        try:
+            with open(DELETE_STATS_FILE, "r") as f:
+                stats = json.load(f)
+        except:
+            stats = {}
+    
+    # Global total
+    stats["total_deleted"] = stats.get("total_deleted", 0) + 1
+    
+    # Branch-Date based nesting
+    if branch_id not in stats:
+        stats[branch_id] = {}
+    
+    stats[branch_id][date_str] = stats[branch_id].get(date_str, 0) + 1
+    
+    os.makedirs(os.path.dirname(DELETE_STATS_FILE), exist_ok=True)
+    with open(DELETE_STATS_FILE, "w") as f:
+        json.dump(stats, f, indent=2)
+    return stats["total_deleted"]
+
+@app.get("/api/delete-stats")
+async def get_delete_stats(branchId: Optional[str] = Query(None), date: Optional[str] = Query(None)):
+    return load_delete_stats(branchId, date)
+
 @app.delete("/api/delete-event")
-async def delete_event(action: DeleteEventRequest):
+async def delete_event(action: DeleteEventRequest, current_user: str = Depends(get_current_user)):
     """
     Proxy to external delete event API.
     """
@@ -930,6 +1215,82 @@ async def delete_event(action: DeleteEventRequest):
     if not result["success"]:
         raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])
     
+    # Increment delete count
+    # Find the date for this visit to increment date-specific count
+    event_date = None
+    try:
+        from backend.utils.cluster_loader import get_data_root
+        branch_proc_path = os.path.join(get_data_root(), "processed", branch_id)
+        if os.path.exists(branch_proc_path):
+            # Check selected date first for efficiency
+            selected_date = action.date or datetime.now().strftime("%Y-%m-%d")
+            selected_manifest = os.path.join(branch_proc_path, selected_date, "visit-clusters.json")
+            
+            found_in_selected = False
+            if os.path.exists(selected_manifest):
+                with open(selected_manifest, 'r') as f:
+                    data = json.load(f)
+                for cluster in data.get("clusters", []):
+                    for visit in cluster.get("visits", []):
+                        if str(visit.get("visitId")) == str(action.visitId):
+                            event_date = selected_date
+                            found_in_selected = True
+                            break
+                    if found_in_selected: break
+            
+            if not found_in_selected:
+                for d in os.listdir(branch_proc_path):
+                    manifest_path = os.path.join(branch_proc_path, d, "visit-clusters.json")
+                    if os.path.exists(manifest_path):
+                        with open(manifest_path, 'r') as f:
+                            data = json.load(f)
+                        for cluster in data.get("clusters", []):
+                            for visit in cluster.get("visits", []):
+                                if str(visit.get("visitId")) == str(action.visitId):
+                                    event_date = d
+                                    break
+                            if event_date: break
+                    if event_date: break
+    except:
+        pass
+    
+    increment_delete_count(branch_id, event_date or datetime.now().strftime("%Y-%m-%d"))
+
+    # Persistent mark as deleted in local JSON
+    try:
+        from backend.utils.cluster_loader import get_data_root
+        import json
+        branch_proc_path = os.path.join(get_data_root(), "processed", branch_id)
+        if os.path.exists(branch_proc_path):
+            # Check all date folders to find the visit and event
+            for d in os.listdir(branch_proc_path):
+                manifest_path = os.path.join(branch_proc_path, d, "visit-clusters.json")
+                if os.path.exists(manifest_path):
+                    with open(manifest_path, 'r') as f:
+                        data = json.load(f)
+                    
+                    modified = False
+                    for cluster in data.get("clusters", []):
+                        for visit in cluster.get("visits", []):
+                            if str(visit.get("visitId")) == str(action.visitId):
+                                # Mark the visit itself as deleted if it's the primary event
+                                if action.eventId == 'primary' or action.eventId is None:
+                                    visit["isDeleted"] = True
+                                    modified = True
+                                
+                                # Also mark individual image in allImages if present
+                                for img in visit.get("allImages", []):
+                                    if str(img.get("eventId")) == str(action.eventId) or (action.eventId == 'primary' and img.get("isPrimary")):
+                                        img["isDeleted"] = True
+                                        modified = True
+                    
+                    if modified:
+                        with open(manifest_path, 'w') as f:
+                            json.dump(data, f, indent=2)
+                        logging.info(f"Updated local manifest {d} for deleted event: {action.eventId}")
+    except Exception as e:
+        logging.error(f"Failed to update local manifest for delete-event: {e}")
+
     return result
 
 class DeepDeleteRequest(BaseModel):
@@ -938,7 +1299,7 @@ class DeepDeleteRequest(BaseModel):
     api_key: Optional[str] = None
 
 @app.delete("/api/deep-delete")
-async def deep_delete(action: DeepDeleteRequest):
+async def deep_delete(action: DeepDeleteRequest, current_user: str = Depends(get_current_user)):
     """
     Proxy to external deep delete API.
     """
@@ -959,6 +1320,57 @@ async def deep_delete(action: DeepDeleteRequest):
     if not result["success"]:
         raise HTTPException(status_code=result["status_code"] if "status_code" in result else 500, detail=result["error"])
     
+    # Increment delete count
+    # Find the date for this customer to increment date-specific count
+    customer_date = None
+    try:
+        from backend.utils.cluster_loader import get_data_root
+        branch_proc_path = os.path.join(get_data_root(), "processed", branch_id)
+        if os.path.exists(branch_proc_path):
+            # No 'date' in DeepDeleteRequest, so we must scan date folders
+            for d in os.listdir(branch_proc_path):
+                manifest_path = os.path.join(branch_proc_path, d, "visit-clusters.json")
+                if os.path.exists(manifest_path):
+                    with open(manifest_path, 'r') as f:
+                        data = json.load(f)
+                    for cluster in data.get("clusters", []):
+                        for visit in cluster.get("visits", []):
+                            if str(visit.get("customerId")) == str(action.customerId):
+                                customer_date = d
+                                break
+                        if customer_date: break
+                if customer_date: break
+    except:
+        pass
+
+    increment_delete_count(branch_id, customer_date or datetime.now().strftime("%Y-%m-%d"))
+
+    # Persistent mark as deleted in local JSON
+    try:
+        from backend.utils.cluster_loader import get_data_root
+        import json
+        branch_proc_path = os.path.join(get_data_root(), "processed", branch_id)
+        if os.path.exists(branch_proc_path):
+            for d in os.listdir(branch_proc_path):
+                manifest_path = os.path.join(branch_proc_path, d, "visit-clusters.json")
+                if os.path.exists(manifest_path):
+                    with open(manifest_path, 'r') as f:
+                        data = json.load(f)
+                    
+                    modified = False
+                    for cluster in data.get("clusters", []):
+                        for visit in cluster.get("visits", []):
+                            if str(visit.get("customerId")) == str(action.customerId):
+                                visit["isDeleted"] = True
+                                modified = True
+                    
+                    if modified:
+                        with open(manifest_path, 'w') as f:
+                            json.dump(data, f, indent=2)
+                        logging.info(f"Updated local manifest {d} for deep-deleted customer: {action.customerId}")
+    except Exception as e:
+        logging.error(f"Failed to update local manifest for deep-delete: {e}")
+
     return result
 
 @app.get("/system-metrics")
@@ -968,11 +1380,11 @@ async def get_system_metrics(branchId: Optional[str] = Query(None), date: Option
     If branchId or date are not provided, it falls back to mock data or config defaults.
     """
     import random
-    
+
     # Fallback to config if not provided
     branch_id = branchId or config["api"].get("branchId", "TMJ-CBE")
     date_str = date or datetime.now().strftime("%Y-%m-%d")
-    
+
     try:
         data = load_clusters(branch_id, date_str)
         if data:
@@ -980,18 +1392,18 @@ async def get_system_metrics(branchId: Optional[str] = Query(None), date: Option
             total_visits = data.get("meta", {}).get("totalVisits", 0)
             total_images = data.get("meta", {}).get("totalProcessedUnique", 0) # Use unique images/visits
             unique_customers = data.get("meta", {}).get("uniqueCustomers", 0)
-            
+
             # Count conflicts and duplicates
             conflict_count = 0
             duplicate_count = 0
-            
+
             for c in clusters:
                 has_conflict = c.get("type") == "conflict" or any(v.get("conflictIds") and len(v.get("conflictIds")) > 0 for v in c.get("visits", []))
                 if has_conflict:
                     conflict_count += 1
                 elif c.get("type") == "duplicate" or len(c.get("visits", [])) >= 2:
                     duplicate_count += 1
-            
+
             return {
                 "gpuUsage": random.randint(10, 80),
                 "cpuUsage": random.randint(20, 60),
@@ -1020,6 +1432,77 @@ async def get_system_metrics(branchId: Optional[str] = Query(None), date: Option
             "conflictCases": 0
         }
     }
+
+@app.get("/api/processing-metrics/dashboard")
+async def get_processing_metrics_dashboard():
+    """
+    Phase 5: Returns comprehensive dashboard summary of all processing metrics.
+    """
+    try:
+        dashboard_data = metrics_manager.get_dashboard_summary()
+        return {
+            "success": True,
+            "data": dashboard_data
+        }
+    except Exception as e:
+        logging.error(f"Error fetching dashboard metrics: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {
+                "total_syncs": 0,
+                "active_syncs": 0,
+                "completed_syncs": 0,
+                "failed_syncs": 0
+            }
+        }
+
+@app.get("/api/processing-metrics/sync")
+async def get_sync_metrics(branchId: str = Query(...), date: str = Query(...)):
+    """
+    Phase 5: Returns detailed metrics for a specific sync operation.
+    """
+    try:
+        sync_metrics = metrics_manager.get_sync_metrics(branchId, date)
+        if sync_metrics:
+            from dataclasses import asdict
+            return {
+                "success": True,
+                "data": asdict(sync_metrics)
+            }
+        else:
+            return {
+                "success": False,
+                "error": "No metrics found for this branch/date",
+                "data": None
+            }
+    except Exception as e:
+        logging.error(f"Error fetching sync metrics: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "data": None
+        }
+
+@app.get("/api/processing-metrics/recent")
+async def get_recent_syncs(limit: int = Query(10, ge=1, le=100)):
+    """
+    Phase 5: Returns recent sync operations across all branches.
+    """
+    try:
+        recent_syncs = metrics_manager.get_recent_syncs(limit=limit)
+        from dataclasses import asdict
+        return {
+            "success": True,
+            "data": [asdict(s) for s in recent_syncs]
+        }
+    except Exception as e:
+        logging.error(f"Error fetching recent syncs: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "data": []
+        }
 
 if __name__ == "__main__":
     import uvicorn

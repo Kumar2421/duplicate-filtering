@@ -12,6 +12,14 @@ const api = axios.create({
   baseURL: BASE_URL,
 });
 
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('auth_token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
 export const fetchVisits = async (branchId: string, startDate: string, endDate: string) => {
   const response = await api.get('/fetch-visits', {
     params: {
@@ -173,6 +181,13 @@ export const fetchBranches = async () => {
   return response.data;
 };
 
+export const fetchBranchToken = async (branchId: string) => {
+  const response = await api.get('/api/auth/branch-token', {
+    params: { branchId },
+  });
+  return response.data;
+};
+
 export const fetchFullClusters = async (branchId: string, date: string) => {
   const response = await api.get('/api/clusters', {
     params: {
@@ -180,6 +195,14 @@ export const fetchFullClusters = async (branchId: string, date: string) => {
       date,
     },
   });
+  return response.data;
+};
+
+export const fetchDeleteStats = async (branchId?: string, date?: string): Promise<{ total_deleted: number; date_deleted: number }> => {
+  const params = new URLSearchParams();
+  if (branchId) params.append('branchId', branchId);
+  if (date) params.append('date', date);
+  const response = await api.get(`/api/delete-stats?${params.toString()}`);
   return response.data;
 };
 

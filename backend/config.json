@@ -1,36 +1,21 @@
 {
   "api": {
     "enabled": true,
-    "base_url": "https://api.analytics.thefusionapps.com/api/v4/retail/visit-stats",
+    "base_url": "https://live.thefusionapps.com/api/v4/retail/visit-stats",
     "configs": [
       {
-        "branchId": "CBE-TRS",
-        "startDate": "2026-04-17"
-      },
-      {
-        "branchId": "CBE-TITAN",
-        "startDate": "2026-04-17"
-      },
-      {
-        "branchId": "EA-NATURALS",
-        "startDate": "2026-04-17"
-      },
-      {
-        "branchId": "GT-CBE",
-        "startDate": "2026-04-17"
-      },
-      {
         "branchId": "TMJ-CBE",
-        "startDate": "2026-04-17"
-      },
-      {
-        "branchId": "GT-ODISHA",
-        "startDate": "2026-04-17"
+        "startDate": "2026-05-1",
+        "syncStartDate": "2026-05-1",
+        "syncEndDate": ""
       }
     ],
     "category": "all",
+    "limit": 50,
     "timeRange": "0,300,18000",
     "restart": false,
+    "deep_sync": false,
+    "syncWindowDays": 3,
     "fetchInterval": 2
   },
   "model": {

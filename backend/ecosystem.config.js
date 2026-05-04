@@ -10,8 +10,9 @@ module.exports = {
 
       // Option B (branch-wise token fetching) - provide these via shell env or PM2 ecosystem
       // so they are NOT hardcoded in the repo.
-      ANALYTICS_EMAIL: process.env.ANALYTICS_EMAIL,
-      ANALYTICS_PASSWORD: process.env.ANALYTICS_PASSWORD,
+      // Admin login credentials
+      ADMIN_USERNAME: process.env.ADMIN_USERNAME || "demo@admin.com",
+      ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || "Fusion@12345",
       ANALYTICS_DEVICE_ID: process.env.ANALYTICS_DEVICE_ID,
 
       // Optional overrides (defaults are already set in AnalyticsAuthService)
@@ -23,6 +24,8 @@ module.exports = {
     },
     autorestart: true,
     watch: false,
-    max_memory_restart: '4G'
+    max_memory_restart: '12G'
   }]
 };
+
+// to restart pm2 delete duplicate && pm2 start backend/ecosystem.config.js

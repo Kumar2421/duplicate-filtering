@@ -1,19 +1,23 @@
 import React, { useMemo, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
-import { fetchDuplicateClusters, fetchAvailableDates, deepDelete, deleteEvent, BASE_URL } from '../services/api';
+import { fetchDuplicateClusters, fetchAvailableDates, deepDelete, deleteEvent, fetchDeleteStats, BASE_URL } from '../services/api';
 import { Button } from '../components/ui/button';
 import { Search, MapPin, RefreshCw, AlertCircle, Code, Copy, UserCircle, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from '../components/ui/input';
 import { DateSelector } from '../components/DateSelector';
+import { TimePicker } from '../components/TimePicker';
 
 const Employees: React.FC = () => {
   const { currentBranch, dateRange, setDateRange } = useAppStore();
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = React.useState('');
-  const [showSidebar, setShowSidebar] = React.useState(true);
-  const [apiKey, setApiKey] = React.useState('');
+  const [showSidebar, setShowSidebar] = React.useState(false);
+  const [timeFromDraft, setTimeFromDraft] = React.useState<string>('');
+  const [timeToDraft, setTimeToDraft] = React.useState<string>('');
+  const [timeFrom, setTimeFrom] = React.useState<string>('');
+  const [timeTo, setTimeTo] = React.useState<string>('');
   const [deepDeletingCustomerIds, setDeepDeletingCustomerIds] = React.useState<Set<string>>(new Set());
   const [deletedCustomerIds, setDeletedCustomerIds] = React.useState<Set<string>>(new Set());
   const [deletingEventKeys, setDeletingEventKeys] = React.useState<Set<string>>(new Set());
@@ -27,6 +31,12 @@ const Employees: React.FC = () => {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['duplicate-clusters', currentBranch, dateRange.startDate],
     queryFn: () => fetchDuplicateClusters(currentBranch, dateRange.startDate),
+  });
+
+  const { data: deleteStats, refetch: refetchStats } = useQuery({
+    queryKey: ['delete-stats', currentBranch, dateRange.startDate],
+    queryFn: () => fetchDeleteStats(currentBranch, dateRange.startDate),
+    refetchInterval: 5000,
   });
 
   useEffect(() => {
@@ -50,10 +60,11 @@ const Employees: React.FC = () => {
     });
 
     try {
+      const branchToken = localStorage.getItem(`branch_token_${currentBranch}`);
       const result = await deepDelete({
         branchId: currentBranch,
         customerId: customerId,
-        api_key: apiKey
+        api_key: branchToken || undefined
       });
 
       if (result.success) {
@@ -63,6 +74,7 @@ const Employees: React.FC = () => {
           next.add(customerId);
           return next;
         });
+        refetchStats();
 
         queryClient.setQueryData(
           ['duplicate-clusters', currentBranch, dateRange.startDate],
@@ -108,11 +120,12 @@ const Employees: React.FC = () => {
     });
 
     try {
+      const branchToken = localStorage.getItem(`branch_token_${currentBranch}`);
       const result = await deleteEvent({
         branchId: currentBranch,
-        visitId,
-        eventId,
-        api_key: apiKey,
+        visitId: visitId,
+        eventId: eventId,
+        api_key: branchToken || undefined
       });
 
       if (result.success) {
@@ -123,6 +136,7 @@ const Employees: React.FC = () => {
           next.add(eventKey);
           return next;
         });
+        refetchStats();
 
         queryClient.setQueryData(
           ['duplicate-clusters', currentBranch, dateRange.startDate],
@@ -160,6 +174,33 @@ const Employees: React.FC = () => {
     const hasEmployee = c.visits?.some((v: any) => v.isEmployee === true);
     if (!hasEmployee) return false;
 
+    if (timeFrom || timeTo) {
+      const anyInRange = (c.visits || []).some((v: any) => {
+        if (!v.isEmployee) return false;
+        const et = v.entryTime;
+        const xt = v.exitTime;
+        if (!et || typeof et !== 'string') return false;
+
+        const entryDate = new Date(et);
+        const exitDate = xt ? new Date(xt) : entryDate;
+
+        const [fromHour, fromMinute] = timeFrom ? timeFrom.split(':').map(Number) : [0, 0];
+        const [toHour, toMinute] = timeTo ? timeTo.split(':').map(Number) : [23, 59];
+
+        const filterFromMinutes = fromHour * 60 + fromMinute;
+        const filterToMinutes = toHour * 60 + toMinute;
+
+        // Check if visit overlaps with the filter time range (within the same day)
+        const entryMinutes = entryDate.getUTCHours() * 60 + entryDate.getUTCMinutes();
+        const exitMinutes = exitDate.getUTCHours() * 60 + exitDate.getUTCMinutes();
+
+        return (entryMinutes >= filterFromMinutes && entryMinutes <= filterToMinutes) ||
+          (exitMinutes >= filterFromMinutes && exitMinutes <= filterToMinutes) ||
+          (entryMinutes <= filterFromMinutes && exitMinutes >= filterToMinutes);
+      });
+      if (!anyInRange) return false;
+    }
+
     if (!searchQuery.trim()) return true;
 
     const query = searchQuery.toLowerCase().trim();
@@ -187,6 +228,14 @@ const Employees: React.FC = () => {
     }));
   }, [filteredClusters]);
 
+  const totalEmployeesCount = useMemo(() => {
+    const ids = new Set<string>();
+    filteredClusters.forEach((c: any) => {
+      c.customerIds?.forEach((id: string) => ids.add(id));
+    });
+    return ids.size;
+  }, [filteredClusters]);
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     toast.success("Copied to clipboard");
@@ -212,9 +261,21 @@ const Employees: React.FC = () => {
                 <UserCircle className="text-indigo-600" />
                 Employee Management
               </h1>
-              <p className="text-slate-500 font-bold text-xs uppercase tracking-widest">
-                Showing {filteredClusters.length} staff profiles for {dateRange.startDate}
-              </p>
+              <div className="flex items-center gap-4">
+                <p className="text-slate-500 font-bold text-xs uppercase tracking-widest">
+                  Showing {filteredClusters.length} staff profiles for {dateRange.startDate}
+                </p>
+                <div className="flex items-center gap-2 px-3 py-1 bg-red-50 text-red-600 rounded-full border border-red-100">
+                  <Trash2 size={12} />
+                  <span className="text-[10px] font-black uppercase tracking-tighter">Date Deleted: {deleteStats?.date_deleted ?? 0}</span>
+                </div>
+                <div className="h-4 w-[1px] bg-slate-200" />
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black text-indigo-600 uppercase bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">
+                    Total Staff: {totalEmployeesCount ?? 0}
+                  </span>
+                </div>
+              </div>
             </div>
             <div className="flex gap-2">
               <Button
@@ -247,24 +308,28 @@ const Employees: React.FC = () => {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <div className="flex gap-2 w-full md:w-auto">
-              <div className="flex-1 md:w-64 relative">
-                <Input
-                  type="password"
-                  placeholder="Enter API Key..."
-                  className="h-11 bg-white border-slate-200 rounded-xl text-sm font-medium pr-10"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                />
-                <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                  <div className={`w-2 h-2 rounded-full ${apiKey ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-                </div>
-              </div>
+            <div className="flex flex-wrap gap-2 w-full md:w-auto">
+              <TimePicker
+                value={timeFromDraft}
+                onChange={setTimeFromDraft}
+                placeholder="From Time"
+              />
+              <TimePicker
+                value={timeToDraft}
+                onChange={setTimeToDraft}
+                placeholder="To Time"
+              />
               <div className="hidden lg:flex items-center gap-2 px-4 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-600">
                 <MapPin className="w-3 h-3 text-indigo-500" /> {currentBranch}
               </div>
               <DateSelector />
-              <Button className="flex-1 md:flex-initial h-11 bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase text-xs tracking-widest px-8 rounded-xl shadow-lg shadow-indigo-100">
+              <Button
+                onClick={() => {
+                  setTimeFrom(timeFromDraft);
+                  setTimeTo(timeToDraft);
+                }}
+                className="flex-1 md:flex-initial h-11 bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase text-xs tracking-widest px-8 rounded-xl shadow-lg shadow-indigo-100"
+              >
                 Apply Filters
               </Button>
             </div>

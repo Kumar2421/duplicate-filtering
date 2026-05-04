@@ -72,7 +72,6 @@ class ClusterService:
         visits: List[Dict[str, Any]] = []
         for visit_id, pts in by_visit.items():
             # Choose primary as the identity anchor for this visit.
-            # This protects against a visit containing multiple people (wrong face picked on some events).
             primary_point = self._pick_primary_point(pts)
 
             # Fallback: if primary missing, use best quality point.
@@ -114,6 +113,9 @@ class ClusterService:
                 if p is primary_point or sim >= intra_visit_threshold:
                     accepted.append((qf, p))
 
+            # Memory optimization: clear pts early
+            pts.clear()
+
             if not accepted:
                 continue
 
@@ -121,12 +123,15 @@ class ClusterService:
             selected = accepted[:top_k]
 
             vectors = [np.array(p.vector, dtype=np.float32) for _, p in selected]
+            # Clear accepted after selection
+            accepted.clear()
+            
             vec = np.mean(vectors, axis=0)
             n = float(np.linalg.norm(vec))
             if n > 0:
                 vec = vec / n
 
-            rep_point = primary_point
+            rep_point = selected[0][1] # Use the highest quality accepted point
             payload = rep_point.payload or {}
 
             visits.append(
@@ -140,14 +145,19 @@ class ClusterService:
                     "image": payload.get("webPath") or payload.get("url"),
                     "refImage": payload.get("rawVisit", {}).get("refImage") if isinstance(payload.get("rawVisit"), dict) else payload.get("refImage"),
                     "anchorId": payload.get("anchorId"),
-                    "eventId": payload.get("eventId"),
+                    "eventId": payload.get("eventId") or None,
+                    "isPrimary": payload.get("isPrimary", False) or payload.get("imageType") == "primary",
                     "entryEventIds": payload.get("entryEventIds") or [],
                     "exitEventIds": payload.get("exitEventIds") or [],
                     "isDeleted": payload.get("isDeleted", False),
+                    "entryTime": payload.get("entryTime"),
+                    "exitTime": payload.get("exitTime"),
                     "vector": vec,
                 }
             )
 
+        # Clear the temporary dictionary
+        by_visit.clear()
         return visits
 
     async def get_clusters_for_date(self, branch_id: str, date: str, existing_data: Optional[Dict[str, Any]] = None, force_reprocess: bool = False, total_api_visits: int = 0, threshold: Optional[float] = None) -> Dict[str, Any]:
@@ -163,19 +173,25 @@ class ClusterService:
             existing_data = None
         
         # Step 1: Fetch all points for branch + date from Qdrant
-        self.logger.info(f"Searching in collection: {self.qdrant.collection_name}")
-        points = self.qdrant.client.scroll(
-            collection_name=self.qdrant.collection_name,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(key="branchId", match=models.MatchValue(value=str(branch_id))),
-                    models.FieldCondition(key="date", match=models.MatchValue(value=str(date))),
-                ]
-            ),
-            limit=10000,
-            with_payload=True,
-            with_vectors=True
-        )[0]
+        self.logger.info(f"Searching in collection: {self.qdrant.collection_name} for branchId={branch_id}, date={date}")
+        try:
+            scroll_result = self.qdrant.client.scroll(
+                collection_name=self.qdrant.collection_name,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(key="branchId", match=models.MatchValue(value=str(branch_id))),
+                        models.FieldCondition(key="date", match=models.MatchValue(value=str(date))),
+                    ]
+                ),
+                limit=10000,
+                with_payload=True,
+                with_vectors=True
+            )
+            points = scroll_result[0]
+            self.logger.info(f"QDRANT_FETCH: Found {len(points)} points for {branch_id} on {date}")
+        except Exception as e:
+            self.logger.error(f"QDRANT_FETCH_ERROR: Failed to scroll points: {e}")
+            points = []
 
         if not points:
             self.logger.warning(f"No points found in Qdrant for branchId={branch_id} and date={date}")
@@ -249,11 +265,6 @@ class ClusterService:
                 all_images = []
 
                 if branch_id_v and date_v and visit_id_v:
-                    # Construct simplified local path: /images/{branchId}/{date}/{visitId}/primary.jpg
-                    # This matches the FastAPI mount: app.mount("/images", StaticFiles(directory="data/raw"))
-                    local_primary = f"/images/{branch_id_v}/{date_v}/{visit_id_v}/primary.jpg"
-                    image_url = local_primary
-
                     # Scan the visit folder for ALL available images
                     # Path: data/raw/{branchId}/{date}/{visitId}/
                     visit_dir = Path(get_data_root()) / "raw" / str(branch_id_v) / str(date_v) / str(visit_id_v)
@@ -278,6 +289,38 @@ class ClusterService:
                         # Sort to put primary image first
                         all_images.sort(key=lambda x: not x["isPrimary"])
 
+                        primary_path = visit_dir / "primary.jpg"
+                        if primary_path.exists():
+                            image_url = f"/images/{branch_id_v}/{date_v}/{visit_id_v}/primary.jpg"
+                        elif all_images:
+                            # No primary.jpg, but we have other local images. Use the first one.
+                            image_url = all_images[0]["url"]
+
+                # Phase 2: Robust null handling for time fields
+                def _safe_get_time(v_dict: dict, field: str) -> Optional[str]:
+                    """
+                    Safely extract time field with null handling.
+                    Priority:
+                    1. Direct field (from Qdrant payload via _build_visit_vectors_from_points)
+                    2. rawVisit fallback (for backward compatibility)
+                    """
+                    # Try direct field first (from Qdrant payload)
+                    time_val = v_dict.get(field)
+                    if time_val and isinstance(time_val, str) and len(time_val) >= 10:
+                        return time_val
+
+                    # Try rawVisit fallback (for backward compatibility with old data)
+                    raw_visit = v_dict.get("rawVisit")
+                    if isinstance(raw_visit, dict):
+                        time_val = raw_visit.get(field)
+                        if time_val and isinstance(time_val, str) and len(time_val) >= 10:
+                            return time_val
+
+                    return None
+
+                entry_time = _safe_get_time(v, "entryTime")
+                exit_time = _safe_get_time(v, "exitTime")
+
                 # Build visit object with new required fields
                 v_copy = {
                     "uniqueKey": unique_key,
@@ -288,6 +331,8 @@ class ClusterService:
                     "eventId": v.get("eventId"),
                     "branchId": branch_id_v,
                     "date": date_v,
+                    "entryTime": entry_time,
+                    "exitTime": exit_time,
                     "image": image_url,
                     "allImages": all_images,
                     "refImage": v.get("refImage"),
@@ -301,6 +346,13 @@ class ClusterService:
                         "updatedAt": None
                     })
                 }
+
+                # Backwards-compat display field used by Visits.tsx
+                try:
+                    if entry_time and isinstance(entry_time, str) and "T" in entry_time:
+                        v_copy["time"] = entry_time.split("T", 1)[1].replace("Z", "")[:5]
+                except Exception:
+                    pass
                 serializable_visits.append(v_copy)
 
             output_clusters.append({

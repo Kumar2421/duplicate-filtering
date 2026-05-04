@@ -10,7 +10,9 @@ from ..db.qdrant_manager import EmbeddingPoint, make_point_id
 from ..ml.embedding_service import EmbeddingService
 from ..storage.file_manager import FileManager
 from ..storage.json_cluster_writer import JsonClusterWriter
-from ..ingestion.visit_normalizer import normalize_visit, NormalizedImage
+from ..storage.visit_manifest_manager import VisitManifestManager
+from ..ingestion.visit_normalizer import normalize_visit, NormalizedImage, _coerce_bool
+from ..metrics.processing_metrics import ProcessingMetricsManager
 
 @dataclass
 class PipelineMetrics:
@@ -42,6 +44,8 @@ class IngestionPipeline:
         self.file_manager = file_manager
         self.downloader = downloader
         self.manifest_writer = JsonClusterWriter()
+        self.visit_manifest_manager = VisitManifestManager()
+        self.metrics_manager = ProcessingMetricsManager()
         self.logger = logging.getLogger(__name__)
 
     def _visit_manifest_path(self, branch_id: str, date: str, visit_id: str) -> str:
@@ -101,6 +105,26 @@ class IngestionPipeline:
 
             metrics.total_embeddings_extracted += 1
             
+            # Phase 2: Null handling for time data - extract and normalize
+            raw_visit = visit_ctx.get("raw") or {}
+            entry_time = raw_visit.get("entryTime")
+            exit_time = raw_visit.get("exitTime")
+
+            # Normalize time fields - ensure they're valid ISO8601 or None
+            def _normalize_time_field(time_val: Any) -> Optional[str]:
+                if time_val is None or str(time_val).strip() == "":
+                    return None
+                try:
+                    # Validate it's a reasonable datetime string
+                    if isinstance(time_val, str) and len(time_val) >= 10:
+                        return str(time_val)
+                    return None
+                except Exception:
+                    return None
+
+            entry_time = _normalize_time_field(entry_time)
+            exit_time = _normalize_time_field(exit_time)
+
             payload = {
                 "visitId": str(visit_ctx["visitId"]),
                 "customerId": str(visit_ctx["customerId"]),
@@ -108,6 +132,8 @@ class IngestionPipeline:
                 "date": str(visit_ctx["date"]),
                 "isEmployee": visit_ctx.get("isEmployee", False),
                 "isDeleted": visit_ctx.get("isDeleted", False),
+                "entryTime": entry_time,
+                "exitTime": exit_time,
                 "eventId": str(img.eventId) if img.eventId else None,
                 "imageType": img.imageType,
                 "url": img.url,
@@ -140,7 +166,12 @@ class IngestionPipeline:
             self.logger.error(f"Error processing image: {e}\n{traceback.format_exc()}")
             return None
 
-    async def process_visits(self, visits: Iterable[Dict[str, Any]], force_reprocess: bool = False, target_date: Optional[str] = None, target_branch_id: Optional[str] = None) -> Dict[str, Any]:
+    async def process_visits(self, visits: Iterable[Dict[str, Any]], force_reprocess: bool = False, target_date: Optional[str] = None, target_branch_id: Optional[str] = None, deep_sync: bool = False) -> Dict[str, Any]:
+        """
+        Process visits with smart incremental sync (Phase 1).
+        Only reprocesses visits that have changed based on updatedAt timestamp.
+        If deep_sync is True, it forces flag checks for all visits.
+        """
         metrics = PipelineMetrics()
         points_to_store: List[EmbeddingPoint] = []
 
@@ -149,27 +180,47 @@ class IngestionPipeline:
 
         active_groups: List[Dict[str, Any]] = []
 
+        # Phase 1: Track processed visits for smart incremental sync
+        visits_processed_count = 0
+        visits_skipped_count = 0
+
         for raw_visit in visits:
-            if len(points_to_store) >= global_cap:
+            if not deep_sync and len(points_to_store) >= global_cap:
                 break
 
             try:
                 visit_ctx = normalize_visit(raw_visit)
-                
+
                 # Override branchId if target_branch_id is provided
                 if target_branch_id:
                     visit_ctx["branchId"] = str(target_branch_id)
-                
+
                 # STRICT DATE FILTERING: Skip visits that don't match the requested sync date
                 if target_date and str(visit_ctx.get("date")) != str(target_date):
                     self.logger.warning(f"INGESTION: Skipping visit {visit_ctx['visitId']} from {visit_ctx['date']} (Requested: {target_date})")
                     continue
+
+                # Phase 1: Smart Incremental Sync - Check if visit needs reprocessing
+                visit_id = str(visit_ctx.get("visitId"))
+                branch_id = str(visit_ctx.get("branchId"))
+                date_str = str(visit_ctx.get("date"))
+                upstream_updated_at = raw_visit.get("updatedAt")
+
+                if not deep_sync and not force_reprocess and target_date and target_branch_id:
+                    needs_processing = self.visit_manifest_manager.needs_reprocessing(
+                        target_branch_id, target_date, visit_id, upstream_updated_at
+                    )
+                    if not needs_processing:
+                        visits_skipped_count += 1
+                        self.logger.debug(f"INGESTION: Skipping visit {visit_id} - no changes since last sync")
+                        continue
 
                 # NOTE: Do NOT skip an entire visit based on existence.
                 # Visits can receive new events/images over time; we dedupe at the event/image level
                 # using Qdrant eventId checks and stable point IDs.
 
                 metrics.total_visits_processed += 1
+                visits_processed_count += 1
 
                 images: List[NormalizedImage] = list(visit_ctx.get("images") or [])
                 entry_event_ids = [str(img.eventId) for img in images if img.imageType == "entry" and img.eventId]
@@ -198,28 +249,65 @@ class IngestionPipeline:
                     img_obj_to_pid[id(img)] = pid
 
                 # Check which points already exist in Qdrant to skip embedding extraction
-                existing_pids = set()
+                existing_pids = []
+                existing_points_map = {}
                 if not force_reprocess and img_pids:
                     try:
                         # Batch check existence in Qdrant
                         result = self.qdrant.client.retrieve(
                             collection_name=self.qdrant.collection_name,
                             ids=img_pids,
-                            with_payload=False,
-                            with_vectors=False
+                            with_payload=True,
+                            with_vectors=True
                         )
-                        existing_pids = {str(p.id) for p in result}
+                        for p in result:
+                            existing_pids.append(str(p.id))
+                            existing_points_map[str(p.id)] = p
+                        
                         if existing_pids:
-                            self.logger.info(f"INGESTION: Skipping {len(existing_pids)} already processed points for visit {visit_ctx['visitId']}")
+                            self.logger.info(f"INGESTION: Found {len(existing_pids)} existing points for visit {visit_ctx['visitId']}")
                     except Exception as e:
                         self.logger.error(f"Error checking point existence: {e}")
+
+                existing_pids_set = set(existing_pids)
+                
+                # Update payloads for existing points if isEmployee/isDeleted changed
+                for pid in existing_pids:
+                    p = existing_points_map[pid]
+                    payload = p.payload or {}
+                    
+                    # Check if critical flags need updating
+                    current_is_employee = _coerce_bool(payload.get("isEmployee"))
+                    new_is_employee = _coerce_bool(visit_ctx.get("isEmployee"))
+                    
+                    current_is_deleted = _coerce_bool(payload.get("isDeleted"))
+                    new_is_deleted = _coerce_bool(visit_ctx.get("isDeleted"))
+                    
+                    if current_is_employee != new_is_employee or current_is_deleted != new_is_deleted:
+                        self.logger.info(f"INGESTION: Updating payload for existing point {pid} (isEmployee: {current_is_employee}->{new_is_employee}, isDeleted: {current_is_deleted}->{new_is_deleted})")
+                        payload["isEmployee"] = new_is_employee
+                        payload["isDeleted"] = new_is_deleted
+                        
+                        # Mark that this visit needs its JSON patched
+                        visit_ctx["flags_changed"] = True
+                        
+                        # Use the existing vector
+                        vec = p.vector
+                        if isinstance(vec, dict):
+                            vec = next(iter(vec.values()), None)
+                        
+                        points_to_store.append(EmbeddingPoint(
+                            point_id=pid,
+                            vector=vec,
+                            payload=payload
+                        ))
 
                 # Only process images whose pointId does not exist in Qdrant.
                 # This is the core optimization to avoid disk reads + ML embedding re-extraction.
                 if force_reprocess:
                     images_to_process = list(images)
                 else:
-                    images_to_process = [img for img in images if img_obj_to_pid.get(id(img)) not in existing_pids]
+                    images_to_process = [img for img in images if img_obj_to_pid.get(id(img)) not in existing_pids_set]
 
                 if not images_to_process:
                     continue
@@ -392,14 +480,54 @@ class IngestionPipeline:
                         points_to_store.append(img_point)
                         matched_group["stored"] += 1
 
+                # Phase 1: Save visit manifest after successful processing
+                if target_date and target_branch_id:
+                    try:
+                        self.visit_manifest_manager.save_visit_manifest(
+                            branch_id=target_branch_id,
+                            date=target_date,
+                            visit_id=visit_id,
+                            custom_id=str(visit_ctx.get("customerId")),
+                            updated_at=upstream_updated_at,
+                            status="processed"
+                        )
+                    except Exception as manifest_err:
+                        self.logger.error(f"Failed to save visit manifest for {visit_id}: {manifest_err}")
+
             except Exception as e:
                 self.logger.error(f"Visit error: {e}")
+                # Phase 1: Mark visit as failed in manifest
+                if target_date and target_branch_id and 'visit_id' in locals():
+                    try:
+                        self.visit_manifest_manager.save_visit_manifest(
+                            branch_id=target_branch_id,
+                            date=target_date,
+                            visit_id=visit_id,
+                            custom_id=str(visit_ctx.get("customerId", "unknown")),
+                            updated_at=raw_visit.get("updatedAt"),
+                            status="failed",
+                            error=str(e)[:500]
+                        )
+                    except Exception:
+                        pass
                 continue
 
         if points_to_store:
             stored = self.qdrant.upsert_in_batches(points_to_store, batch_size=int(settings.BATCH_SIZE))
             metrics.total_embeddings_stored = stored
             self.logger.info(f"Upserted {stored} points")
-            return {"metrics": metrics.to_dict(), "upserted_count": stored}
+            return {
+                "metrics": metrics.to_dict(),
+                "upserted_count": stored,
+                "visits_processed": visits_processed_count,
+                "visits_skipped": visits_skipped_count,
+                "visits_with_flags_changed": [str(v["visitId"]) for v in visits if isinstance(v, dict) and v.get("flags_changed")]
+            }
 
-        return {"metrics": metrics.to_dict(), "upserted_count": 0}
+        return {
+            "metrics": metrics.to_dict(),
+            "upserted_count": 0,
+            "visits_processed": visits_processed_count,
+            "visits_skipped": visits_skipped_count,
+            "visits_with_flags_changed": [str(v["visitId"]) for v in visits if isinstance(v, dict) and v.get("flags_changed")]
+        }

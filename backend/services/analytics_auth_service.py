@@ -121,13 +121,18 @@ class AnalyticsAuthService:
                 return v
         return None
 
-    async def _post_json(self, url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout_seconds: float = 20.0) -> Any:
+    async def _post_json(self, url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout_seconds: float = 60.0) -> Any:
         timeout = httpx.Timeout(timeout_seconds, connect=min(10.0, timeout_seconds))
         async with httpx.AsyncClient(verify=False, timeout=timeout, http2=True) as client:
-            res = await client.post(url, headers=headers, json=payload)
-            if res.status_code >= 400:
-                raise RuntimeError(f"Upstream error {res.status_code}: {res.text[:500]}")
-            return res.json() if res.content else None
+            try:
+                res = await client.post(url, headers=headers, json=payload)
+                if res.status_code >= 400:
+                    self.logger.error(f"Upstream error {res.status_code} for {url}: {res.text[:500]}")
+                    raise RuntimeError(f"Upstream error {res.status_code}: {res.text[:500]}")
+                return res.json() if res.content else None
+            except Exception as e:
+                self.logger.error(f"Network error during POST to {url}: {str(e)}")
+                raise
 
     async def get_tenant_token(self, *, force_refresh: bool = False) -> str:
         if not force_refresh and self._is_token_valid(self._tenant_token):

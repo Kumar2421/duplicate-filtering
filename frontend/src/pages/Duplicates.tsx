@@ -1,12 +1,13 @@
 import React, { useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
-import { fetchDuplicateClusters, fetchAvailableDates, sendConvertAction, fetchConvertJobStatus, deleteEvent, BASE_URL } from '../services/api';
+import { fetchDuplicateClusters, fetchAvailableDates, sendConvertAction, fetchConvertJobStatus, deleteEvent, fetchDeleteStats, BASE_URL } from '../services/api';
 import { Button } from '../components/ui/button';
-import { Search, MapPin, Check, X, RefreshCw, AlertCircle, Layers, Code, Copy, UserCircle } from 'lucide-react';
+import { Search, MapPin, Check, X, RefreshCw, AlertCircle, Layers, Code, Copy, UserCircle, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from '../components/ui/input';
 import { DateSelector } from '../components/DateSelector';
+import { TimePicker } from '../components/TimePicker';
 import {
   Dialog,
   DialogContent,
@@ -21,13 +22,16 @@ import { Label } from "../components/ui/label";
 const Duplicates: React.FC = () => {
   const { currentBranch, dateRange, setDateRange } = useAppStore();
   const [searchQuery, setSearchQuery] = React.useState('');
-  const [showSidebar, setShowSidebar] = React.useState(true);
+  const [showSidebar, setShowSidebar] = React.useState(false);
   const [selectedCluster, setSelectedCluster] = React.useState<any>(null);
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   const [toEmployee, setToEmployee] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [deletingEventKeys, setDeletingEventKeys] = React.useState<Set<string>>(new Set());
-  const [apiKey, setApiKey] = React.useState('');
+  const [deletedEventKeys, setDeletedEventKeys] = React.useState<Set<string>>(new Set());
+  const [timeFromDraft, setTimeFromDraft] = React.useState<string>('');
+  const [timeFrom, setTimeFrom] = React.useState<string>('');
+  const [timeTo, setTimeTo] = React.useState<string>('');
 
   const { data: availableDatesData } = useQuery({
     queryKey: ['available-dates', currentBranch],
@@ -37,6 +41,12 @@ const Duplicates: React.FC = () => {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['duplicate-clusters', currentBranch, dateRange.startDate],
     queryFn: () => fetchDuplicateClusters(currentBranch, dateRange.startDate),
+  });
+
+  const { data: deleteStats, refetch: refetchStats } = useQuery({
+    queryKey: ['delete-stats', currentBranch, dateRange.startDate],
+    queryFn: () => fetchDeleteStats(currentBranch, dateRange.startDate),
+    refetchInterval: 5000,
   });
 
   useEffect(() => {
@@ -78,12 +88,15 @@ const Duplicates: React.FC = () => {
 
     setIsSubmitting(true);
     try {
+      // Get branch token from localStorage for direct API calls
+      const branchToken = localStorage.getItem(`branch_token_${currentBranch}`);
+
       const result = await sendConvertAction({
         customerId1: selectedVisits[0].customerId,
         customerId2: (selectedVisits[1] || selectedVisits[0]).customerId,
         toEmployee: toEmployee,
         branchId: currentBranch,
-        api_key: apiKey
+        api_key: branchToken || undefined
       });
 
       const jobId = result?.jobId;
@@ -109,6 +122,7 @@ const Duplicates: React.FC = () => {
           setSelectedCluster(null);
           setSelectedIds([]);
           refetch();
+          refetchStats();
           break;
         }
 
@@ -143,16 +157,23 @@ const Duplicates: React.FC = () => {
     });
 
     try {
+      const branchToken = localStorage.getItem(`branch_token_${currentBranch}`);
       const result = await deleteEvent({
         branchId: currentBranch,
         visitId: visitId,
         eventId: eventId,
-        api_key: apiKey
+        api_key: branchToken || undefined
       });
 
       if (result.success) {
         toast.success("Image deleted successfully");
+        setDeletedEventKeys(prev => {
+          const next = new Set(prev);
+          next.add(eventKey);
+          return next;
+        });
         refetch();
+        refetchStats();
       }
     } catch (err) {
       // toast.error handled in service
@@ -178,6 +199,32 @@ const Duplicates: React.FC = () => {
 
     if (!isConflictType && !isDuplicateType) return false;
 
+    if (timeFrom || timeTo) {
+      const anyInRange = (c.visits || []).some((v: any) => {
+        const et = v.entryTime;
+        const xt = v.exitTime;
+        if (!et || typeof et !== 'string') return false;
+
+        const entryDate = new Date(et);
+        const exitDate = xt ? new Date(xt) : entryDate;
+
+        const [fromHour, fromMinute] = timeFrom ? timeFrom.split(':').map(Number) : [0, 0];
+        const [toHour, toMinute] = timeTo ? timeTo.split(':').map(Number) : [23, 59];
+
+        const filterFromMinutes = fromHour * 60 + fromMinute;
+        const filterToMinutes = toHour * 60 + toMinute;
+
+        // Check if visit overlaps with the filter time range (within the same day)
+        const entryMinutes = entryDate.getUTCHours() * 60 + entryDate.getUTCMinutes();
+        const exitMinutes = exitDate.getUTCHours() * 60 + exitDate.getUTCMinutes();
+
+        return (entryMinutes >= filterFromMinutes && entryMinutes <= filterToMinutes) ||
+          (exitMinutes >= filterFromMinutes && exitMinutes <= filterToMinutes) ||
+          (entryMinutes <= filterFromMinutes && exitMinutes >= filterToMinutes);
+      });
+      if (!anyInRange) return false;
+    }
+
     if (!searchQuery.trim()) return true;
 
     const query = searchQuery.toLowerCase().trim();
@@ -191,6 +238,14 @@ const Duplicates: React.FC = () => {
 
     return hasMatchingCustomerId || hasMatchingClusterId || hasMatchingVisitId;
   }) || [];
+
+  const totalVisitorIds = useMemo(() => {
+    const ids = new Set<string>();
+    filteredClusters.forEach((c: any) => {
+      c.customerIds?.forEach((id: string) => ids.add(id));
+    });
+    return ids.size;
+  }, [filteredClusters]);
 
   const duplicateGroupsJson = useMemo(() => {
     if (!filteredClusters.length) return null;
@@ -227,9 +282,21 @@ const Duplicates: React.FC = () => {
                 <Layers className="text-blue-600" />
                 Duplicate Detection
               </h1>
-              <p className="text-slate-500 font-bold text-xs uppercase tracking-widest">
-                Showing {filteredClusters.length} clusters for {dateRange.startDate}
-              </p>
+              <div className="flex items-center gap-4">
+                <p className="text-slate-500 font-bold text-xs uppercase tracking-widest">
+                  Showing {filteredClusters.length} clusters for {dateRange.startDate}
+                </p>
+                <div className="flex items-center gap-2 px-3 py-1 bg-red-50 text-red-600 rounded-full border border-red-100">
+                  <Trash2 size={12} />
+                  <span className="text-[10px] font-black uppercase tracking-tighter">Date Deleted: {deleteStats?.date_deleted ?? 0}</span>
+                </div>
+                <div className="h-4 w-[1px] bg-slate-200" />
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-black text-blue-600 uppercase bg-blue-50 px-2 py-0.5 rounded-md border border-blue-100">
+                    Total Visitors: {totalVisitorIds ?? 0}
+                  </span>
+                </div>
+              </div>
             </div>
             <div className="flex gap-2">
               <Button
@@ -262,25 +329,27 @@ const Duplicates: React.FC = () => {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <div className="flex gap-2 w-full md:w-auto">
-              <div className="flex-1 md:w-64 relative">
-                <Input
-                  type="password"
-                  placeholder="Enter API Key..."
-                  className="h-11 bg-white border-slate-200 rounded-xl text-sm font-medium pr-10"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
+            <div className="flex flex-wrap gap-2 w-full md:w-auto">
+              <div className="flex items-center gap-2">
+                <TimePicker
+                  value={timeFromDraft}
+                  onChange={setTimeFromDraft}
+                  placeholder="From Entry"
                 />
-                <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                  <div className={`w-2 h-2 rounded-full ${apiKey ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-                </div>
+                <span className="text-xs text-slate-500 font-medium">From Entry</span>
               </div>
               <div className="hidden lg:flex items-center gap-2 px-4 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-600">
                 <MapPin className="w-3 h-3 text-blue-500" /> {currentBranch}
               </div>
               <DateSelector />
-              <Button className="flex-1 md:flex-initial h-11 bg-blue-600 hover:bg-blue-700 text-white font-black uppercase text-xs tracking-widest px-8 rounded-xl shadow-lg shadow-blue-100">
-                Apply Filters
+              <Button
+                onClick={() => {
+                  setTimeFrom(timeFromDraft);
+                  setTimeTo(''); // Clear timeTo to disable upper bound
+                }}
+                className="flex-1 md:flex-initial h-11 bg-blue-600 hover:bg-blue-700 text-white font-black uppercase text-xs tracking-widest px-8 rounded-xl shadow-lg shadow-blue-100"
+              >
+                Apply Filter
               </Button>
             </div>
           </div>
@@ -305,18 +374,21 @@ const Duplicates: React.FC = () => {
                   <div className="flex items-center justify-between border-b border-slate-200 pb-3">
                     <div className="flex items-center gap-4">
                       <div className="flex flex-wrap gap-2">
-                        {cluster.customerIds?.map((cid: string) => (
-                          <div key={cid} className="flex items-center gap-1 bg-slate-900 text-white px-2 py-0.5 rounded-lg group/cid">
-                            <span className="text-[10px] font-black uppercase tracking-tighter">
-                              {cid}
-                            </span>
-                            {cluster.visits?.some((v: any) => v.customerId === cid && v.isDeleted) && (
-                              <span className="text-[8px] font-black uppercase tracking-tighter bg-red-600 text-white px-1.5 py-0.5 rounded">
-                                Deleted
+                        {cluster.customerIds?.map((cid: string) => {
+                          const isDeleted = cluster.visits?.some((v: any) => v.customerId === cid && v.isDeleted);
+                          return (
+                            <div key={cid} className={`flex items-center gap-1 text-white px-2 py-0.5 rounded-lg group/cid ${isDeleted ? 'bg-slate-400 opacity-70' : 'bg-slate-900'}`}>
+                              <span className="text-[10px] font-black uppercase tracking-tighter">
+                                {cid}
                               </span>
-                            )}
-                          </div>
-                        ))}
+                              {isDeleted && (
+                                <span className="text-[8px] font-black uppercase tracking-tighter bg-red-600 text-white px-1.5 py-0.5 rounded">
+                                  Deleted
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                       <span className="text-xs font-bold text-slate-400">
                         {cluster.visits?.length || 0} Visits
@@ -429,57 +501,70 @@ const Duplicates: React.FC = () => {
                         ? visit.allImages
                         : [{ url: visit.image || visit.imageUrl, name: 'primary.jpg', isPrimary: true }];
 
-                      return images.map((img: any, iIdx: number) => (
-                        <div key={`${visit.visitId}-${img.name}-${iIdx}`} className="group relative aspect-[3/4] rounded-xl overflow-hidden bg-white border border-slate-100 shadow-sm transition-all cursor-pointer">
-                          <img
-                            src={img.url.startsWith('/') ? `${BASE_URL}${img.url}` : img.url}
-                            className="w-full h-full object-cover"
-                            onError={(e: any) => e.target.src = 'https://placehold.co/300x400?text=No+Photo'}
-                            loading="lazy"
-                          />
+                      return images.map((img: any, iIdx: number) => {
+                        const eventKey = `${visit.visitId}:${img.eventId || 'primary'}`;
+                        const isDeleted = img.isDeleted || deletedEventKeys.has(eventKey);
 
-                          {img.eventId && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteImage(visit.visitId, img.eventId);
-                              }}
-                              disabled={deletingEventKeys.has(`${visit.visitId}:${img.eventId}`)}
-                              className="absolute top-2 right-2 z-20 p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm shadow-sm"
-                              title="Reject/Delete Event"
-                            >
-                              {deletingEventKeys.has(`${visit.visitId}:${img.eventId}`) ? (
-                                <RefreshCw size={12} className="animate-spin" />
-                              ) : (
-                                <X size={12} />
-                              )}
-                            </button>
-                          )}
+                        return (
+                          <div key={`${visit.visitId}-${img.name}-${iIdx}`} className={`group relative aspect-[3/4] rounded-xl overflow-hidden bg-white border border-slate-100 shadow-sm transition-all cursor-pointer ${isDeleted ? 'opacity-50 grayscale' : ''}`}>
+                            <img
+                              src={img.url.startsWith('/') ? `${BASE_URL}${img.url}` : img.url}
+                              className="w-full h-full object-cover"
+                              onError={(e: any) => e.target.src = 'https://placehold.co/300x400?text=No+Photo'}
+                              loading="lazy"
+                            />
 
-                          <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pb-3 backdrop-blur-[1px]">
-                            <div className="flex flex-wrap gap-1 mb-1">
-                              {visit.isEmployee && (
-                                <span className="bg-blue-500 text-white text-[7px] font-black px-1.5 py-0.5 rounded shadow-sm flex items-center gap-1 uppercase tracking-tighter">
-                                  <UserCircle size={8} />
-                                  Employee
+                            {isDeleted && (
+                              <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/20 backdrop-blur-[2px]">
+                                <span className="bg-red-600 text-white text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest shadow-xl">
+                                  Deleted
                                 </span>
-                              )}
-                            </div>
-                            {visit.conflictIds && visit.conflictIds.length > 0 && (
-                              <div className="mt-1 space-y-1">
-                                <p className="text-[7px] font-black text-red-400 uppercase">Conflicts Found:</p>
-                                <div className="flex flex-wrap gap-1">
-                                  {visit.conflictIds.map((cid: string) => (
-                                    <span key={cid} className="text-[7px] bg-red-500/80 text-white px-1 rounded font-bold">
-                                      {cid.slice(-6)}
-                                    </span>
-                                  ))}
-                                </div>
                               </div>
                             )}
+
+                            {(img.eventId || img.isPrimary) && !isDeleted && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteImage(visit.visitId, img.eventId || 'primary');
+                                }}
+                                disabled={deletingEventKeys.has(eventKey)}
+                                className="absolute top-2 right-2 z-20 p-1.5 bg-red-500/80 hover:bg-red-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-all backdrop-blur-sm shadow-sm"
+                                title="Reject/Delete Event"
+                              >
+                                {deletingEventKeys.has(eventKey) ? (
+                                  <RefreshCw size={12} className="animate-spin" />
+                                ) : (
+                                  <X size={12} />
+                                )}
+                              </button>
+                            )}
+
+                            <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2 pb-3 backdrop-blur-[1px]">
+                              <div className="flex flex-wrap gap-1 mb-1">
+                                {visit.isEmployee && (
+                                  <span className="bg-blue-500 text-white text-[7px] font-black px-1.5 py-0.5 rounded shadow-sm flex items-center gap-1 uppercase tracking-tighter">
+                                    <UserCircle size={8} />
+                                    Employee
+                                  </span>
+                                )}
+                              </div>
+                              {visit.conflictIds && visit.conflictIds.length > 0 && (
+                                <div className="mt-1 space-y-1">
+                                  <p className="text-[7px] font-black text-red-400 uppercase">Conflicts Found:</p>
+                                  <div className="flex flex-wrap gap-1">
+                                    {visit.conflictIds.map((cid: string) => (
+                                      <span key={cid} className="text-[7px] bg-red-500/80 text-white px-1 rounded font-bold">
+                                        {cid.slice(-6)}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      ));
+                        );
+                      });
                     })}
                   </div>
                 </div>

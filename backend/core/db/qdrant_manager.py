@@ -44,17 +44,21 @@ class QdrantManager:
                 self.logger.info(f"Qdrant collection created: {self.collection_name}")
 
             # Ensure Payload Indexes for branchId and date for fast filtering
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name="branchId",
-                field_schema=models.PayloadSchemaType.KEYWORD,
-            )
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name="date",
-                field_schema=models.PayloadSchemaType.KEYWORD,
-            )
-            self.logger.info(f"Qdrant payload indexes ensured for branchId and date")
+            # Only if not in local/path mode (local Qdrant doesn't support payload indexes)
+            if not getattr(self.client, "_path", None):
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="branchId",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="date",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+                self.logger.info(f"Qdrant payload indexes ensured for branchId and date")
+            else:
+                self.logger.debug("Skipping payload indexes in local Qdrant mode")
         except Exception as e:
             self.logger.error(f"Error ensuring Qdrant collection or indexes: {e}")
             raise

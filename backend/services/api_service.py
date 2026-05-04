@@ -13,7 +13,7 @@ class APIService:
     def __init__(
         self,
         base_url: str,
-        limit: int = 50,
+        limit: int = 30,
         category: str = "potential",
         time_range: str = "0,300,18000",
         enabled: bool = True,
@@ -21,7 +21,7 @@ class APIService:
         auth_service: Optional[AnalyticsAuthService] = None,
     ):
         self.base_url = base_url
-        self.limit = limit
+        self.limit = 30
         self.category = category
         self.time_range = time_range
         self.enabled = enabled
@@ -102,7 +102,11 @@ class APIService:
         api_key_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Fetch a single page for a specific date with retry logic.
+        Phase 4: Enhanced fetch with improved retry logic and error handling.
+        - Exponential backoff
+        - Retry on transient errors (429, 502, 503, 504)
+        - Better timeout handling
+        - Detailed error logging
         """
         if not self.enabled:
             self.logger.info("API Fetching is disabled in config.")
@@ -115,20 +119,27 @@ class APIService:
             "page": page,
             "limit": self.limit,
             "category": self.category,
+            "nocache": "true",
             "timeRange": effective_time_range,
+            "excludeEmployee": "true",
             "excludeSingleEvent": "true",
             "excludeMissedService": "true",
             "isGroup": "true"
         }
-        
+
         headers = await self._get_upstream_headers(branch_id=branch_id, api_key_override=api_key_override)
+
+        # Phase 4: Exponential backoff delays (1s, 2s, 4s, 8s, ...)
+        base_delay = 1.0
 
         for attempt in range(retries):
             try:
-                async with httpx.AsyncClient(verify=False, timeout=20.0, http2=True) as client:
+                # Phase 4: Increased timeout for reliability (120s total, 30s connect)
+                timeout = httpx.Timeout(120.0, connect=30.0)
+                async with httpx.AsyncClient(verify=False, timeout=timeout, http2=True) as client:
                     response = await client.get(self.base_url, params=params, headers=headers)
 
-                    # If token expired or branch token is wrong, refresh once and retry.
+                    # Phase 4: Handle 401 with token refresh
                     if response.status_code == 401 and self.auth_service is not None and not api_key_override:
                         self.logger.warning(f"Attempt {attempt+1}: Received 401 for {date} page {page}. Refreshing token and retrying once.")
                         headers = await self._get_upstream_headers(
@@ -138,52 +149,95 @@ class APIService:
                         )
                         response = await client.get(self.base_url, params=params, headers=headers)
 
+                    # Success
                     if response.status_code == 200:
-                        return response.json()
+                        try:
+                            return response.json()
+                        except Exception as json_err:
+                            self.logger.error(f"Failed to parse JSON from page {page}: {json_err}")
+                            self.logger.error(f"Response content: {response.text[:500]}")
+                            # Return empty on JSON parse errors
+                            return {}
 
-                    self.logger.warning(f"Attempt {attempt+1}: Received {response.status_code} for {date} page {page}")
+                    # Phase 4: Retry on transient errors
+                    if response.status_code in [429, 502, 503, 504]:
+                        self.logger.warning(f"Attempt {attempt+1}: Transient error {response.status_code} for {date} page {page}, will retry")
+                    else:
+                        # For other errors (400, 404, etc.), log but don't retry further
+                        self.logger.error(f"Attempt {attempt+1}: HTTP {response.status_code} for {date} page {page}: {response.text[:200]}")
+                        if attempt >= retries - 1:
+                            return {}
+
+            except httpx.TimeoutException as timeout_err:
+                self.logger.error(f"Attempt {attempt+1}: Timeout fetching {date} page {page}: {str(timeout_err)}")
+            except httpx.HTTPError as http_err:
+                self.logger.error(f"Attempt {attempt+1}: HTTP error fetching {date} page {page}: {str(http_err)}")
             except Exception as e:
-                self.logger.error(f"Attempt {attempt+1}: Error fetching {date} page {page}: {str(e)}")
-            
+                self.logger.error(f"Attempt {attempt+1}: Unexpected error fetching {date} page {page}: {str(e)}")
+
+            # Phase 4: Exponential backoff before retry
             if attempt < retries - 1:
-                await asyncio.sleep(1) # Backoff
-        
+                delay = base_delay * (2 ** attempt)
+                self.logger.info(f"Retrying in {delay}s...")
+                await asyncio.sleep(delay)
+
+        self.logger.error(f"All {retries} attempts failed for {date} page {page}")
         return {}
 
     async def fetch_visits_for_date(self, branch_id: str, date: str, time_range: Optional[str] = None, api_key_override: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Loops through all pages for a single date.
+        Loops through all pages for a single date using parallel fetching.
         """
-        all_visits = []
-        page = 0
+        # Step 1: Fetch first page to get total count or determine if more pages exist
+        first_page = await self.fetch_page(branch_id, date, 0, time_range=time_range, api_key_override=api_key_override)
+        all_visits = first_page.get("visits", [])
+        
+        if not all_visits or len(all_visits) < self.limit:
+            return all_visits
+
+        # Step 2: Parallel fetch next pages with a small concurrency limit (worker pool)
+        # Since we don't know the total pages exactly, we fetch in chunks
+        chunk_size = 3 # Number of parallel workers
+        page = 1
         
         while True:
-            data = await self.fetch_page(branch_id, date, page, time_range=time_range, api_key_override=api_key_override)
-            visits = data.get("visits", [])
+            tasks = [
+                self.fetch_page(branch_id, date, p, time_range=time_range, api_key_override=api_key_override)
+                for p in range(page, page + chunk_size)
+            ]
             
-            if not visits:
+            self.logger.info(f"Parallel Fetch: Requesting pages {page} to {page + chunk_size - 1} for {date}")
+            results = await asyncio.gather(*tasks)
+            
+            found_empty = False
+            for res in results:
+                visits = res.get("visits", [])
+                if not visits:
+                    found_empty = True
+                    break
+                all_visits.extend(visits)
+                if len(visits) < self.limit:
+                    found_empty = True
+                    break
+            
+            if found_empty:
                 break
                 
-            all_visits.extend(visits)
-            self.logger.info(f"Date {date}: Page {page} fetched ({len(visits)} visits)")
+            page += chunk_size
             
-            # If we got less than limit, it might be the last page
-            if len(visits) < self.limit:
-                break
-                
-            page += 1
-            
+        self.logger.info(f"Date {date}: Total {len(all_visits)} visits fetched across multiple pages")
         return all_visits
 
-    async def fetch_incremental_pages(self, branch_id: str, date: str, last_updated: Optional[str] = None, api_key_override: Optional[str] = None) -> AsyncGenerator[List[Dict[str, Any]], None]:
+    async def fetch_incremental_pages(self, branch_id: str, date: str, last_updated: Optional[str] = None, api_key_override: Optional[str] = None, deep_sync: bool = False) -> AsyncGenerator[List[Dict[str, Any]], None]:
         """
         Polls the API page by page. 
         Yields a page only if it contains visits newer than last_updated.
         Stops once a page contains visits older than last_updated (since they are sorted newest first).
+        If deep_sync is True, it yields all visits regardless of last_updated.
         """
         page = 0
         last_ts = None
-        if last_updated:
+        if last_updated and not deep_sync:
             try:
                 # Normalize last_updated to UTC-aware datetime
                 last_ts = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
@@ -204,7 +258,7 @@ class APIService:
             # OPTIMIZATION: If we are on page 0 and have a last_ts, check the first visit.
             # If the most recent visit is already older than or equal to last_ts,
             # we can stop immediately because the API returns visits sorted newest first.
-            if page == 0 and last_ts:
+            if page == 0 and last_ts and not deep_sync:
                 first_v = visits[0]
                 v_updated_at = first_v.get("updatedAt")
                 if v_updated_at:
@@ -261,7 +315,7 @@ class APIService:
         Proxy call to v3 conformation/action API.
         Saves local log of actions sent.
         """
-        api_url = "https://api.analytics.thefusionapps.com/api/v3/conformation/action/"
+        api_url = "https://live.thefusionapps.com/api/v3/conformation/action/"
         
         payload = {
             "id": str(action_data["id"]), # clusterId -> conformation_id
@@ -277,19 +331,19 @@ class APIService:
             api_key = self._get_api_key_for_branch(branch_id)
         headers = {
             "Authorization": f"Bearer {api_key}" if api_key else "",
-            "Content-Type": "application/json",
-            "accept": "application/json, text/plain, */*",
-            "accept-language": "en-US,en;q=0.9,en-IN;q=0.8",
-            "referer": "https://analytics.develop.thefusionapps.com/",
-            "origin": "https://analytics.develop.thefusionapps.com",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
-            "dnt": "1",
-            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-site",
+            # "Content-Type": "application/json",
+            # "accept": "application/json, text/plain, */*",
+            # "accept-language": "en-US,en;q=0.9,en-IN;q=0.8",
+            # "referer": "https://analytics.develop.thefusionapps.com/",
+            # "origin": "https://analytics.develop.thefusionapps.com",
+            # "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+            # "dnt": "1",
+            # "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+            # "sec-ch-ua-mobile": "?0",
+            # "sec-ch-ua-platform": '"Windows"',
+            # "sec-fetch-dest": "empty",
+            # "sec-fetch-mode": "cors",
+            # "sec-fetch-site": "same-site",
             "x-cache-bypass": "true"
         }
 
@@ -329,8 +383,8 @@ class APIService:
         Proxy call to v3 convert API.
         """
         api_urls = [
-            "https://api.analytics.thefusionapps.com/api/v3/convert/",
-            "https://api.analytics.thefusionapps.com/api/v3/convert",
+            "https://live.thefusionapps.com/api/v3/convert/",
+            "https://live.thefusionapps.com/api/v3/convert",
         ]
         
         if api_key_override:
@@ -341,15 +395,15 @@ class APIService:
             api_key = self._get_api_key_for_branch(branch_id)
         headers = {
             "Authorization": f"Bearer {api_key}" if api_key else "",
-            "Content-Type": "application/json",
-            "accept": "application/json, text/plain, */*",
-            "referer": "https://analytics.develop.thefusionapps.com/",
-            "origin": "https://analytics.develop.thefusionapps.com",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
-            "dnt": "1",
-            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
+            # "Content-Type": "application/json",
+            # "accept": "application/json, text/plain, */*",
+            # "referer": "https://analytics.develop.thefusionapps.com/",
+            # "origin": "https://analytics.develop.thefusionapps.com",
+            # "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+            # "dnt": "1",
+            # "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+            # "sec-ch-ua-mobile": "?0",
+            # "sec-ch-ua-platform": '"Windows"',
             "x-cache-bypass": "true"
         }
 
@@ -446,7 +500,7 @@ class APIService:
         URL: https://api.analytics.thefusionapps.com/api/v2/retail/delete/event/{visitId}/{eventId}
         Method: POST (as per user observation)
         """
-        api_url = f"https://api.analytics.thefusionapps.com/api/v2/retail/delete/event/{visit_id}/{event_id}"
+        api_url = f"https://live.thefusionapps.com/api/v2/retail/delete/event/{visit_id}/{event_id}"
         
         if api_key_override:
             api_key = api_key_override
@@ -456,18 +510,18 @@ class APIService:
             api_key = self._get_api_key_for_branch(branch_id)
         headers = {
             "Authorization": f"Bearer {api_key}" if api_key else "",
-            "Content-Type": "application/json",
-            "accept": "application/json, text/plain, */*",
-            "referer": "https://analytics.develop.thefusionapps.com/",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
-            "dnt": "1",
-            "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "origin": "https://analytics.develop.thefusionapps.com",
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-site",
+            # "Content-Type": "application/json",
+            # "accept": "application/json, text/plain, */*",
+            # "referer": "https://analytics.develop.thefusionapps.com/",
+            # "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+            # "dnt": "1",
+            # "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+            # "sec-ch-ua-mobile": "?0",
+            # "sec-ch-ua-platform": '"Windows"',
+            # "origin": "https://analytics.develop.thefusionapps.com",
+            # "sec-fetch-dest": "empty",
+            # "sec-fetch-mode": "cors",
+            # "sec-fetch-site": "same-site",
             "x-cache-bypass": "true"
         }
 
@@ -506,10 +560,10 @@ class APIService:
     async def send_deep_delete(self, branch_id: str, customer_id: str, api_key_override: Optional[str] = None) -> Dict[str, Any]:
         """
         Proxy call to v2 retail deep delete API.
-        URL: https://api.analytics.thefusionapps.com/api/v2/retail/deepDelete/{customerId}
+        URL: https://.analytics.thefusionapps.com/api/v2/retail/deepDelete/{customerId}
         Method: DELETE
         """
-        api_url = f"https://api.analytics.thefusionapps.com/api/v2/retail/deepDelete/{customer_id}"
+        api_url = f"https://live.thefusionapps.com/api/v2/retail/deepDelete/{customer_id}"
         
         if api_key_override:
             api_key = api_key_override

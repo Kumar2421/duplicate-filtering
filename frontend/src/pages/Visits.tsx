@@ -11,6 +11,9 @@ const Visits: React.FC = () => {
     const { currentBranch, dateRange, setDateRange } = useAppStore();
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedItem, setSelectedItem] = useState<any>(null);
+    const [timeFromDraft, setTimeFromDraft] = useState<string>('');
+    const [timeFrom, setTimeFrom] = useState<string>('');
+    const [timeTo, setTimeTo] = useState<string>('');
 
     const { data: availableDatesData } = useQuery({
         queryKey: ['available-dates', currentBranch],
@@ -23,15 +26,35 @@ const Visits: React.FC = () => {
     });
 
     const flattenedVisits = useMemo(() => {
-        if (!data?.clusters) return [];
+        if (!data?.visits) return [];
 
-        let visits = data.clusters.flatMap((cluster: any) =>
-            cluster.visits.map((visit: any) => ({
-                ...visit,
-                clusterType: cluster.type,
-                clusterCustomerIds: cluster.customerIds
-            }))
-        );
+        let visits = data.visits.map((visit: any) => ({
+            ...visit,
+            clusterType: visit.clusterType || 'valid',
+            clusterCustomerIds: visit.customerIds || []
+        }));
+
+        if (timeFrom || timeTo) {
+            visits = visits.filter((v: any) => {
+                const et = v.entryTime;
+                if (!et || typeof et !== 'string') return false;
+
+                // Extract time portion from entryTime (HH:MM format)
+                const entryTimeStr = et.includes('T') ? et.split('T')[1].replace('Z', '') : et;
+                const [entryHour, entryMinute] = entryTimeStr.split(':').map(Number);
+
+                // Convert filter times to numbers for comparison
+                const [fromHour, fromMinute] = timeFrom ? timeFrom.split(':').map(Number) : [0, 0];
+                const [toHour, toMinute] = timeTo ? timeTo.split(':').map(Number) : [23, 59];
+
+                // Convert to minutes since midnight for easy comparison
+                const entryMinutes = entryHour * 60 + entryMinute;
+                const fromMinutes = fromHour * 60 + fromMinute;
+                const toMinutes = toHour * 60 + toMinute;
+
+                return entryMinutes >= fromMinutes && entryMinutes <= toMinutes;
+            });
+        }
 
         if (searchQuery.trim()) {
             const query = searchQuery.toLowerCase().trim();
@@ -43,7 +66,7 @@ const Visits: React.FC = () => {
         }
 
         return visits;
-    }, [data, searchQuery]);
+    }, [data, searchQuery, timeFrom, timeTo, dateRange.startDate]);
 
     useEffect(() => {
         if (availableDatesData?.dates?.length > 0) {
@@ -104,13 +127,28 @@ const Visits: React.FC = () => {
                         onChange={(e) => setSearchQuery(e.target.value)}
                     />
                 </div>
-                <div className="flex gap-2 w-full md:w-auto">
+                <div className="flex flex-wrap gap-2 w-full md:w-auto">
+                    <div className="flex items-center gap-2">
+                        <Input
+                            type="time"
+                            className="h-11 bg-white border-slate-200 rounded-xl text-sm font-medium w-[120px] flex-none"
+                            value={timeFromDraft}
+                            onChange={(e) => setTimeFromDraft(e.target.value)}
+                        />
+                        <span className="text-xs text-slate-500 font-medium">From Entry</span>
+                    </div>
                     <div className="hidden lg:flex items-center gap-2 px-4 bg-slate-100 rounded-xl text-[10px] font-black uppercase text-slate-600">
                         <MapPin className="w-3 h-3 text-blue-500" /> {currentBranch}
                     </div>
                     <DateSelector />
-                    <Button className="flex-1 md:flex-initial h-11 bg-blue-600 hover:bg-blue-700 text-white font-black uppercase text-xs tracking-widest px-8 rounded-xl shadow-lg shadow-blue-100">
-                        Apply Filters
+                    <Button
+                        onClick={() => {
+                            setTimeFrom(timeFromDraft);
+                            setTimeTo(''); // Clear timeTo to disable upper bound
+                        }}
+                        className="flex-1 md:flex-initial h-11 bg-blue-600 hover:bg-blue-700 text-white font-black uppercase text-xs tracking-widest px-8 rounded-xl shadow-lg shadow-blue-100"
+                    >
+                        Apply Filter
                     </Button>
                 </div>
             </div>
@@ -130,7 +168,7 @@ const Visits: React.FC = () => {
                 </div>
             ) : (
                 <div className="space-y-10">
-                    {data?.visits?.map((visit: any, idx: number) => {
+                    {flattenedVisits?.map((visit: any, idx: number) => {
                         const images = visit.allImages && visit.allImages.length > 0
                             ? visit.allImages
                             : [{ url: visit.image || visit.imageUrl, name: 'primary.jpg', isPrimary: true }];
@@ -189,7 +227,7 @@ const Visits: React.FC = () => {
                 </div>
             )}
 
-            {data?.visits?.length === 0 && !isLoading && (
+            {flattenedVisits?.length === 0 && !isLoading && (
                 <div className="flex flex-col items-center justify-center py-32 bg-white rounded-3xl border border-dashed border-slate-200 shadow-inner">
                     <AlertCircle className="w-16 h-16 text-slate-200 mb-4" />
                     <h3 className="text-xl font-black text-slate-900 uppercase tracking-widest">No Visits Found</h3>
