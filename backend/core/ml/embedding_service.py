@@ -49,9 +49,18 @@ class EmbeddingService:
             return EmbeddingResult(embedding=None, quality=q.quality, passed=False, reason="no_embedding")
 
         if isinstance(emb, np.ndarray):
+            # Ensure embedding is L2 normalized
+            norm = np.linalg.norm(emb)
+            if norm > 1e-6:
+                emb = emb / norm
             emb_list = emb.astype(float).tolist()
         else:
-            emb_list = list(emb)
+            # Fallback normalization for non-ndarray
+            emb_np = np.array(emb, dtype=np.float32)
+            norm = np.linalg.norm(emb_np)
+            if norm > 1e-6:
+                emb_np = emb_np / norm
+            emb_list = emb_np.tolist()
 
-        self.logger.info("ML_RECOGNITION: Embedding successfully extracted")
+        self.logger.info("ML_RECOGNITION: Embedding successfully extracted and normalized")
         return EmbeddingResult(embedding=emb_list, quality=q.quality, passed=True, reason=None)

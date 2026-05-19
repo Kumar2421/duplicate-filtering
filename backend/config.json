@@ -5,12 +5,14 @@
     "configs": [
       {
         "branchId": "TMJ-CBE",
-        "startDate": "2026-05-1",
-        "syncStartDate": "2026-05-1",
+        "startDate": "2026-05-18",
+        "syncStartDate": "2026-05-18",
         "syncEndDate": ""
       }
     ],
     "category": "all",
+    "employee_category": "employees",
+    "fetchEmployeeCategory": false,
     "limit": 50,
     "timeRange": "0,300,18000",
     "restart": false,
@@ -20,7 +22,7 @@
   },
   "model": {
     "name": "buffalo_l",
-    "threshold": 0.5,
+    "threshold": 0.7,
     "quality_filter": {
       "min_blur": 30.0,
       "min_confidence": 0.85,
@@ -30,6 +32,6 @@
   "qdrant": {
     "collection": "face_embeddings",
     "vector_size": 512,
-    "path": "./qdrant_db"
+    "path": "./qdrant_db_v2"
   }
 }

@@ -9,8 +9,8 @@ from typing import Iterable, List, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
-from ..config.settings import settings
-from ..ingestion.types import EmbeddingPoint
+from core.config.settings import settings
+from core.ingestion.types import EmbeddingPoint
 
 
 class QdrantManager:
@@ -26,10 +26,11 @@ class QdrantManager:
         self.client = QdrantClient(path=path or settings.QDRANT_PATH)
         self._ensure_collection()
 
-    def _ensure_collection(self):
+    def _ensure_collection(self, collection_name: Optional[str] = None):
+        target_collection = collection_name or self.collection_name
         try:
             collections = self.client.get_collections().collections
-            exists = any(c.name == self.collection_name for c in collections)
+            exists = any(c.name == target_collection for c in collections)
             if not exists:
                 distance = models.Distance.COSINE
                 if str(settings.QDRANT_DISTANCE).upper() == "DOT":
@@ -38,29 +39,30 @@ class QdrantManager:
                     distance = models.Distance.EUCLID
 
                 self.client.recreate_collection(
-                    collection_name=self.collection_name,
+                    collection_name=target_collection,
                     vectors_config=models.VectorParams(size=self.vector_size, distance=distance),
                 )
-                self.logger.info(f"Qdrant collection created: {self.collection_name}")
+                self.logger.info(f"Qdrant collection created: {target_collection}")
 
             # Ensure Payload Indexes for branchId and date for fast filtering
             # Only if not in local/path mode (local Qdrant doesn't support payload indexes)
             if not getattr(self.client, "_path", None):
                 self.client.create_payload_index(
-                    collection_name=self.collection_name,
+                    collection_name=target_collection,
                     field_name="branchId",
                     field_schema=models.PayloadSchemaType.KEYWORD,
                 )
-                self.client.create_payload_index(
-                    collection_name=self.collection_name,
-                    field_name="date",
-                    field_schema=models.PayloadSchemaType.KEYWORD,
-                )
-                self.logger.info(f"Qdrant payload indexes ensured for branchId and date")
+                if target_collection == self.collection_name:
+                    self.client.create_payload_index(
+                        collection_name=target_collection,
+                        field_name="date",
+                        field_schema=models.PayloadSchemaType.KEYWORD,
+                    )
+                self.logger.info(f"Qdrant payload indexes ensured for {target_collection}")
             else:
-                self.logger.debug("Skipping payload indexes in local Qdrant mode")
+                self.logger.debug(f"Skipping payload indexes for {target_collection} in local Qdrant mode")
         except Exception as e:
-            self.logger.error(f"Error ensuring Qdrant collection or indexes: {e}")
+            self.logger.error(f"Error ensuring Qdrant collection or indexes for {target_collection}: {e}")
             raise
 
     def event_exists(self, event_id: str, branch_id: str, date: str) -> bool:

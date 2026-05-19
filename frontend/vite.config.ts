@@ -9,6 +9,10 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 9002,
     proxy: {
+      '/api/id-workflow': {
+        target: 'http://localhost:8009',
+        changeOrigin: true,
+      },
       '/api': {
         target: 'http://localhost:8009',
         changeOrigin: true,

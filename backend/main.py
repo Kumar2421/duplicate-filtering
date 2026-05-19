@@ -7,7 +7,7 @@ import sys
 import pytz
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, Depends, Query, BackgroundTasks, HTTPException, status
+from fastapi import FastAPI, Depends, Query, BackgroundTasks, HTTPException, status, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import numpy as np
 import httpx
@@ -80,22 +80,30 @@ class CompareFacesRequest(BaseModel):
     crop_padding: Optional[int] = 0
     threshold: Optional[float] = None
 
-from backend.services.api_service import APIService
-from backend.services.ml_service import MLService
-from backend.services.db_service import DBService
-from backend.utils.normalizer import normalize_visit_data
-from backend.core.pipeline.ingestion_pipeline import IngestionPipeline, PipelineMetrics
-from backend.core.storage.json_cluster_writer import JsonClusterWriter
-from backend.core.ml.embedding_service import EmbeddingService
-from backend.core.ml.model_manager import ModelManager
-from backend.core.ml.quality_filter import QualityFilter
-from backend.core.storage.file_manager import FileManager
-from backend.core.storage.http_downloader import HttpDownloader as ImageDownloader
-from backend.utils.cluster_loader import load_clusters, get_flattened_visits, get_filtered_duplicates
-from backend.api.check_enrollment import create_check_enrollment_router
-from backend.core.clustering.similarity import cosine_similarity
-from backend.services.analytics_auth_service import AnalyticsAuthService
-from backend.core.metrics.processing_metrics import ProcessingMetricsManager
+from services.api_service import APIService
+from services.ml_service import MLService
+from services.db_service import DBService
+from utils.normalizer import normalize_visit_data
+from core.pipeline.ingestion_pipeline import IngestionPipeline, PipelineMetrics
+from core.storage.json_cluster_writer import JsonClusterWriter
+from core.ml.embedding_service import EmbeddingService
+from core.ml.model_manager import ModelManager
+from core.ml.quality_filter import QualityFilter
+from core.storage.file_manager import FileManager
+from core.storage.http_downloader import HttpDownloader as ImageDownloader
+from utils.cluster_loader import load_clusters, get_flattened_visits, get_filtered_duplicates, get_data_root
+from core.services.employee_enrollment_service import EmployeeEnrollmentService
+from api.check_enrollment import create_check_enrollment_router
+from api.employees import create_employees_router
+from core.clustering.similarity import cosine_similarity
+from services.analytics_auth_service import AnalyticsAuthService
+from core.metrics.processing_metrics import ProcessingMetricsManager
+from core.ingestion.visit_merge import (
+    merge_incremental_batch_with_employees,
+    index_visits_by_id,
+    build_employee_catchup_batch,
+    visit_row_id,
+)
 
 # Configuration setup
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -133,11 +141,13 @@ app.add_middleware(
     # NOTE: allow_credentials=True cannot be used with allow_origins=['*'].
     allow_origins=[
         "https://duplicate.tools.thefusionapps.com",
+        "https://api.duplicate.tools.thefusionapps.com",
         "http://localhost:9002",
         "http://localhost:5173",
         "http://127.0.0.1:9002",
         "http://127.0.0.1:5173",
     ],
+    allow_origin_regex="https://.*\\.thefusionapps\\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -148,7 +158,7 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Expose locally stored data (images + manifests) via HTTP
-from backend.utils.cluster_loader import get_data_root
+from utils.cluster_loader import get_data_root
 data_root = get_data_root()
 raw_root = os.path.join(data_root, "raw")
 
@@ -156,6 +166,11 @@ os.makedirs(data_root, exist_ok=True)
 os.makedirs(raw_root, exist_ok=True)
 
 app.mount("/data", StaticFiles(directory=data_root), name="data")
+
+# Mount employee_images directory
+employee_images_root = os.path.join(data_root, "employee_images")
+os.makedirs(employee_images_root, exist_ok=True)
+app.mount("/employee_images", StaticFiles(directory=employee_images_root), name="employee_images")
 
 @app.get("/images/{file_path:path}")
 async def serve_image(file_path: str):
@@ -206,10 +221,11 @@ api_service = APIService(
     enabled=config["api"].get("enabled", True),
     configs=config["api"].get("configs", []),
     auth_service=AnalyticsAuthService(),
+    employee_category=str(config["api"].get("employee_category", "employees") or "employees").strip(),
 )
 
 # Use one shared QdrantManager/client to avoid "Storage folder already accessed"
-from backend.core.db.qdrant_manager import QdrantManager
+from core.db.qdrant_manager import QdrantManager
 qdrant_manager = QdrantManager(
     collection_name=config["qdrant"]["collection"],
     vector_size=512,
@@ -231,21 +247,21 @@ file_manager = FileManager()
 downloader = ImageDownloader()
 
 # Replace the old db_service with one using the shared client
-db_service = DBService(
-    collection_name=config["qdrant"]["collection"],
-    vector_size=512,
-    client=qdrant_manager.client
-)
+qdrant_manager = QdrantManager()
+employee_enrollment_service = EmployeeEnrollmentService(qdrant_manager)
 
-from backend.core.services.cluster_service import ClusterService
+from core.services.cluster_service import ClusterService
 ingestion_pipeline = IngestionPipeline(
     embedding_service=embedding_service,
     qdrant_manager=qdrant_manager,
     file_manager=file_manager,
-    downloader=downloader
+    downloader=downloader,
+    employee_enrollment_service=employee_enrollment_service,
+    api_service=api_service
 )
 cluster_writer = JsonClusterWriter()
 cluster_service = ClusterService(qdrant_manager=qdrant_manager)
+
 # Phase 5: Initialize metrics manager
 metrics_manager = ProcessingMetricsManager()
 
@@ -255,8 +271,19 @@ app.include_router(
         model_manager=model_manager,
         embedding_service=embedding_service,
         file_manager=file_manager,
-        qdrant_manager=qdrant_manager,
-    )
+        qdrant_manager=qdrant_manager
+    ),
+    tags=["Enrollment"]
+)
+
+app.include_router(
+    create_employees_router(
+        employee_enrollment_service=employee_enrollment_service,
+        embedding_service=embedding_service,
+        file_manager=file_manager
+    ),
+    prefix="/api",
+    tags=["Employees"]
 )
 
 
@@ -274,7 +301,54 @@ async def _read_image_bytes(image: str) -> bytes:
         return resp.content
 
 
-def _extract_face_meta(*, img_bgr, return_crops: bool, crop_padding: int):
+import asyncio
+import httpx
+import logging
+from pathlib import Path
+import cv2
+
+from id_card_workflow.service import (
+    init_id_workflow, 
+    process_image_internal, 
+    list_pending_internal, 
+    get_image_path, 
+    verify_image_internal
+)
+
+@app.on_event("startup")
+async def startup_event():
+    init_id_workflow()
+    # ... rest of startup logic ...
+
+@app.get("/api/id-workflow/pending")
+async def list_pending_images():
+    return list_pending_internal()
+
+@app.get("/api/id-workflow/image/{filename}")
+async def get_workflow_image(filename: str):
+    path = get_image_path(filename)
+    if not path:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(path)
+
+@app.post("/api/id-workflow/verify")
+async def verify_workflow_image(filename: str = Form(...), is_id_card: bool = Form(...)):
+    success = verify_image_internal(filename, is_id_card)
+    if not success:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return {"status": "success"}
+
+async def _send_to_id_workflow(image_path: str):
+    """
+    Sends an image to the ID card workflow internal logic for processing and storage.
+    """
+    try:
+        await process_image_internal(Path(image_path), Path(image_path).name)
+        logging.info(f"ID_WORKFLOW: Successfully processed {image_path}")
+    except Exception as e:
+        logging.error(f"ID_WORKFLOW: Error processing image: {e}")
+
+def _extract_face_meta(*, img_bgr, return_crops: bool, crop_padding: int, visit_context: dict = None):
     try:
         app_insight = model_manager.get_app()
         faces = app_insight.get(img_bgr) or []
@@ -300,12 +374,26 @@ def _extract_face_meta(*, img_bgr, return_crops: bool, crop_padding: int):
         )
 
         if return_crops:
-            from backend.api.check_enrollment import crop_by_bbox
+            from api.check_enrollment import crop_by_bbox
             import base64
             import cv2
 
             crop = crop_by_bbox(img_bgr, bb, pad=int(crop_padding or 0))
             if crop is not None:
+                # Save crop temporarily and send to ID workflow
+                if visit_context:
+                    try:
+                        temp_crop_dir = Path("/home/fusion-gpu/fusion-projects/duplicate-filtering/backend/id_card_workflow/temp_crops")
+                        temp_crop_dir.mkdir(parents=True, exist_ok=True)
+                        temp_name = f"{visit_context.get('visitId', 'unknown')}_{bb[0]}_{bb[1]}.jpg"
+                        temp_path = temp_crop_dir / temp_name
+                        cv2.imwrite(str(temp_path), crop)
+                        
+                        # Use background task to send to ID workflow service
+                        asyncio.create_task(_send_to_id_workflow(str(temp_path)))
+                    except Exception as e:
+                        logging.error(f"ID_WORKFLOW: Error saving/sending crop: {e}")
+
                 ok, buf = cv2.imencode(".jpg", crop)
                 if ok:
                     crops_b64.append(base64.b64encode(buf.tobytes()).decode("utf-8"))
@@ -336,11 +424,13 @@ async def compare_faces(payload: CompareFacesRequest):
         img_bgr=img1_bgr,
         return_crops=bool(payload.return_crops),
         crop_padding=int(payload.crop_padding or 0),
+        visit_context={"visitId": "compare_req_1"}
     )
     meta2 = _extract_face_meta(
         img_bgr=img2_bgr,
         return_crops=bool(payload.return_crops),
         crop_padding=int(payload.crop_padding or 0),
+        visit_context={"visitId": "compare_req_2"}
     )
 
     r1 = embedding_service.extract_face_features(img1_bgr)
@@ -400,6 +490,7 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, mo
     """
     Processes a single branch: ingest new visits and update clusters.
     Phase 5: Now with comprehensive metrics tracking.
+    Separates 'all' (primary) and 'employees' feeds.
     """
     b_id = branch_cfg.get("branchId")
     if not b_id:
@@ -447,145 +538,142 @@ async def sync_branch(branch_cfg: dict, date_str: str, restart_enabled: bool, mo
                         shutil.rmtree(target_dir)
                         logging.info(f"Deep Wiped {folder} dir: {target_dir}")
 
-            # 1. Load existing cluster manifest to get lastUpdated
+            # ---------------------------------------------------------
+            # CYCLE A: PRIMARY FEED (category="all")
+            # ---------------------------------------------------------
+            logging.info(f"PIPELINE: Starting CYCLE A (Primary Feed) for {b_id} on {date_str}")
+            
+            # Load existing cluster manifest to get lastUpdated
             latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
             
-            last_updated = None
+            last_updated_all = None
             if not restart_enabled and not deep_sync:
-                # Prefer persisted cursor over manifest meta (meta can change for reasons unrelated to upstream updates).
-                last_updated = api_service.load_last_updated_cursor(b_id, date_str)
-
-                # Backwards-compat: if no cursor yet, fall back to manifest meta.
-                if not last_updated and not deep_sync and latest_manifest and "meta" in latest_manifest:
-                    last_updated = latest_manifest["meta"].get("lastUpdated")
+                last_updated_all = api_service.load_last_updated_cursor(b_id, date_str, category="all")
+                if not last_updated_all and latest_manifest and "meta" in latest_manifest:
+                    last_updated_all = latest_manifest["meta"].get("lastUpdated")
             
-            # If still no last_updated, check if branch-specific startDate exists
-            if not last_updated and not deep_sync:
+            if not last_updated_all and not deep_sync:
                 last_updated_str = branch_cfg.get("startDate")
                 if last_updated_str:
-                    last_updated = f"{last_updated_str}T00:00:00.000Z"
-            
-            # 2. Fetch new visits from API page by page and process immediately
-            pages_processed = 0
-            day_visits_all = await api_service.fetch_visits_for_date(b_id, date_str, api_key_override=api_key_override)
-            total_api_visits = len(day_visits_all)
+                    last_updated_all = f"{last_updated_str}T00:00:00.000Z"
 
-            if deep_sync:
-                logging.info(f"PIPELINE: Deep Sync active for {b_id} on {date_str}. Total API visits to scan: {total_api_visits}")
+            total_api_visits_all = 0
+            try:
+                day_visits_all = await api_service.fetch_visits_for_date(b_id, date_str, api_key_override=api_key_override, category="all")
+                total_api_visits_all = len(day_visits_all)
+            except Exception as e:
+                logging.error(f"PIPELINE: Failed to fetch total 'all' visits: {e}")
 
-            # Phase 5: Update metrics with total API visits
-            metrics_manager.update_sync(b_id, date_str, total_api_visits=total_api_visits)
+            metrics_manager.update_sync(b_id, date_str, total_api_visits=total_api_visits_all)
 
-            max_processed_updated_at = None
+            max_updated_all = None
+            async for batch in api_service.fetch_incremental_pages(b_id, date_str, last_updated_all, api_key_override=api_key_override, deep_sync=deep_sync, category="all"):
+                logging.info(f"PIPELINE: Cycle A - Processing batch of {len(batch)} visits")
+                
+                ingest_res = await ingestion_pipeline.process_visits(batch, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id, deep_sync=deep_sync)
+                
+                # Advance cursor
+                for v in batch:
+                    ua = v.get("updatedAt")
+                    if ua and (max_updated_all is None or str(ua) > str(max_updated_all)):
+                        max_updated_all = str(ua)
 
-            async for new_visits in api_service.fetch_incremental_pages(b_id, date_str, last_updated, api_key_override=api_key_override, deep_sync=deep_sync):
-                logging.info(f"PIPELINE: Processing {len(new_visits)} visits for {b_id} on {date_str} (Deep Sync: {deep_sync})")
-
-                # Phase 5: Update metrics with new visits fetched
-                metrics_manager.update_sync(
-                    b_id, date_str,
-                    new_visits_fetched=sync_metrics.new_visits_fetched + len(new_visits),
-                    api_pages_fetched=sync_metrics.api_pages_fetched + 1
-                )
-
-                # 3. Ingest (Embeddings -> Qdrant)
-                ingest_res = await ingestion_pipeline.process_visits(new_visits, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id, deep_sync=deep_sync)
-                logging.info(f"PIPELINE: Ingestion completed for {b_id} - {ingest_res.get('metrics')} - Upserted {ingest_res.get('upserted_count', 0)} points")
-
-                # Patch isEmployee/isDeleted flags in the local JSON manifest if they changed in Qdrant
-                changed_visit_ids = ingest_res.get("visits_with_flags_changed", [])
-                if changed_visit_ids:
-                    # Reload manifest to ensure we are patching the latest state
-                    latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
-                    if latest_manifest:
-                        modified_json = False
-                        # Create a map of the new normalized visits for quick lookup
-                        # new_visits was already normalized inside ingestion_pipeline.process_visits
-                        # but we need to re-normalize or access the already normalized ones
-                        from backend.core.ingestion.visit_normalizer import normalize_visit
-                        new_normalized_map = {str(v.get("id")): normalize_visit(v) for v in new_visits if v.get("id")}
-                        
-                        for cluster in latest_manifest.get("clusters", []):
-                            for visit in cluster.get("visits", []):
-                                vid = str(visit.get("visitId"))
-                                if vid in changed_visit_ids and vid in new_normalized_map:
-                                    norm_v = new_normalized_map[vid]
-                                    
-                                    new_is_employee = norm_v.get("isEmployee", False)
-                                    new_is_deleted = norm_v.get("isDeleted", False)
-                                    
-                                    if visit.get("isEmployee") != new_is_employee or visit.get("isDeleted") != new_is_deleted:
-                                        logging.info(f"PIPELINE: Patching flags for visit {vid}: isEmployee({visit.get('isEmployee')}->{new_is_employee}), isDeleted({visit.get('isDeleted')}->{new_is_deleted})")
-                                        visit["isEmployee"] = new_is_employee
-                                        visit["isDeleted"] = new_is_deleted
-                                        modified_json = True
-                                        
-                        if modified_json:
-                            cluster_writer.save_visit_clusters(b_id, date_str, latest_manifest)
-                            logging.info(f"PIPELINE: Patched {len(changed_visit_ids)} visits in visit-clusters.json for {b_id} on {date_str}")
-
-
-                # Phase 5: Update metrics with ingestion results
+                # Update metrics
                 ing_metrics = ingest_res.get('metrics', {})
                 metrics_manager.update_sync(
                     b_id, date_str,
+                    new_visits_fetched=sync_metrics.new_visits_fetched + len(batch),
                     images_found=sync_metrics.images_found + ing_metrics.get('total_images_found', 0),
                     images_downloaded=sync_metrics.images_downloaded + ing_metrics.get('total_images_downloaded', 0),
-                    embeddings_extracted=sync_metrics.embeddings_extracted + ing_metrics.get('total_embeddings_extracted', 0),
-                    points_upserted=sync_metrics.points_upserted + ingest_res.get('upserted_count', 0),
-                    visit_manifests_saved=sync_metrics.visit_manifests_saved + ingest_res.get('visits_processed', 0)
+                    points_upserted=sync_metrics.points_upserted + ingest_res.get('upserted_count', 0)
                 )
 
-                # Advance cursor based on upstream visit.updatedAt (UTC ISO8601).
-                for v in new_visits:
-                    v_updated_at = v.get("updatedAt")
-                    if not v_updated_at:
-                        continue
-                    if max_processed_updated_at is None or str(v_updated_at) > str(max_processed_updated_at):
-                        max_processed_updated_at = str(v_updated_at)
+            if max_updated_all and not restart_enabled:
+                api_service.save_last_updated_cursor(b_id, date_str, max_updated_all, category="all")
 
-                # 4. Identity Resolution (Clustering)
-                latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
+            # Run clustering for Cycle A
+            latest_manifest = cluster_writer.load_visit_clusters(b_id, date_str)
+            cluster_res = await cluster_service.get_clusters_for_date(
+                branch_id=b_id, 
+                date=date_str, 
+                existing_data=latest_manifest,
+                total_api_visits=total_api_visits_all,
+                force_reprocess=restart_enabled,
+                threshold=model_threshold,
+            )
+            cluster_writer.save_visit_clusters(b_id, date_str, cluster_res)
+            logging.info(f"PIPELINE: Cycle A Clustering updated for {b_id}")
+
+            # ---------------------------------------------------------
+            # CYCLE B: EMPLOYEE FEED (category="employees")
+            # ---------------------------------------------------------
+            logging.info(f"PIPELINE: Starting CYCLE B (Employee Feed) for {b_id} on {date_str}")
+            
+            last_updated_emp = None
+            if not restart_enabled and not deep_sync:
+                last_updated_emp = api_service.load_last_updated_cursor(b_id, date_str, category="employees")
+            
+            if not last_updated_emp and not deep_sync:
+                last_updated_str = branch_cfg.get("startDate")
+                if last_updated_str:
+                    last_updated_emp = f"{last_updated_str}T00:00:00.000Z"
+
+            max_updated_emp = None
+            employee_records = cluster_writer.load_employees(b_id, date_str) or []
+            emp_visit_ids_seen = {e["visitId"] for e in employee_records}
+
+            async for batch in api_service.fetch_incremental_pages(b_id, date_str, last_updated_emp, api_key_override=api_key_override, deep_sync=deep_sync, category="employees", exclude_employee=False):
+                logging.info(f"PIPELINE: Cycle B - Processing batch of {len(batch)} employee visits")
                 
-                cluster_res = await cluster_service.get_clusters_for_date(
-                    branch_id=b_id, 
-                    date=date_str, 
-                    existing_data=latest_manifest,
-                    total_api_visits=total_api_visits,
-                    force_reprocess=restart_enabled,
-                    threshold=model_threshold,
-                )
+                # Ingest employee visits to Qdrant (important for identity resolution consistency)
+                # We mark them as isEmployee=True
+                for v in batch:
+                    v["isEmployee"] = True
                 
-                cluster_writer.save_visit_clusters(b_id, date_str, cluster_res)
-                logging.info(f"PIPELINE: Clustering updated for {b_id} - {cluster_res.get('meta')}")
+                ingest_res = await ingestion_pipeline.process_visits(batch, force_reprocess=restart_enabled, target_date=date_str, target_branch_id=b_id, deep_sync=deep_sync)
 
-                # Phase 5: Update clustering metrics
-                cluster_meta = cluster_res.get('meta', {})
-                clusters_list = cluster_res.get('clusters', [])
-                conflicts = sum(1 for c in clusters_list if c.get('type') == 'conflict')
-                duplicates = sum(1 for c in clusters_list if c.get('type') == 'duplicate')
+                # Extract data for employees.json
+                for v in batch:
+                    vid = visit_row_id(v)
+                    if vid not in emp_visit_ids_seen:
+                        cid = v.get("customerId") or (v.get("customer") or {}).get("id")
+                        
+                        # Resolve image path
+                        img_path = v.get("image") or v.get("imageUrl")
+                        # The ingestion pipeline saves images to /images/branch/date/visit/primary.jpg
+                        local_img_url = f"/images/{b_id}/{date_str}/{vid}/primary.jpg"
+                        
+                        employee_records.append({
+                            "visitId": vid,
+                            "customerId": str(cid) if cid else "unknown",
+                            "image": local_img_url,
+                            "entryTime": v.get("entryTime"),
+                            "updatedAt": v.get("updatedAt")
+                        })
+                        emp_visit_ids_seen.add(vid)
 
-                metrics_manager.update_sync(
-                    b_id, date_str,
-                    clusters_created=len(clusters_list),
-                    conflicts_detected=conflicts,
-                    duplicates_detected=duplicates
-                )
+                # Advance cursor
+                for v in batch:
+                    ua = v.get("updatedAt")
+                    if ua and (max_updated_emp is None or str(ua) > str(max_updated_emp)):
+                        max_updated_emp = str(ua)
 
-                pages_processed += 1
+            if employee_records:
+                # Sort by entryTime or updatedAt newest first
+                employee_records.sort(key=lambda x: str(x.get("entryTime") or x.get("updatedAt") or ""), reverse=True)
+                cluster_writer.save_employees(b_id, date_str, employee_records)
+                logging.info(f"PIPELINE: Cycle B - Saved {len(employee_records)} employee records to employees.json")
 
-            if not restart_enabled and max_processed_updated_at:
-                api_service.save_last_updated_cursor(b_id, date_str, max_processed_updated_at)
+            if max_updated_emp and not restart_enabled:
+                api_service.save_last_updated_cursor(b_id, date_str, max_updated_emp, category="employees")
 
-            if pages_processed == 0:
-                logging.info(f"PIPELINE: No new visits found for {b_id} on {date_str}")
-
-            # Phase 5: Mark sync as completed
+            # Final metrics update
             metrics_manager.complete_sync(b_id, date_str, status="completed")
 
         except Exception as b_err:
             logging.error(f"PIPELINE ERROR for branch {b_id}: {b_err}")
-            # Phase 5: Mark sync as failed
+            import traceback
+            logging.error(traceback.format_exc())
             metrics_manager.complete_sync(b_id, date_str, status="failed", error_message=str(b_err)[:500])
         finally:
             active_sync_tasks.discard(task_key)
@@ -617,6 +705,10 @@ async def run_pipeline_sync():
             # Keep the live APIService in sync with config (even though Option B auth doesn't rely on configs).
             try:
                 api_service.configs = api_configs
+                api = current_config.get("api") or {}
+                api_service.employee_category = str(api.get("employee_category", "employees") or "employees").strip()
+                if "category" in api:
+                    api_service.category = api["category"]
             except Exception:
                 pass
 
@@ -750,8 +842,8 @@ async def run_pipeline_sync():
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("Application starting up...")
-    # Start the background pipeline sync
+    init_id_workflow()
+    logging.info("Starting background pipeline sync...")
     asyncio.create_task(run_pipeline_sync())
 
 logging.basicConfig(level=logging.INFO)
@@ -927,6 +1019,23 @@ async def get_duplicate_clusters(
         "total": len(clusters)
     }
 
+@app.get("/api/employees")
+async def get_employees(
+    branchId: str = Query(...),
+    date: str = Query(...)
+):
+    """
+    Returns employee records from the new employees.json file.
+    """
+    from utils.cluster_loader import load_employees_data
+    employees = load_employees_data(branchId, date)
+    return {
+        "branchId": branchId,
+        "date": date,
+        "employees": employees,
+        "total": len(employees)
+    }
+
 @app.get("/api/branches")
 async def get_available_branches():
     """
@@ -956,7 +1065,7 @@ async def get_available_dates(branchId: str = Query(...)):
     """
     Returns unique date folder names that have either processed or raw data.
     """
-    from backend.utils.cluster_loader import get_data_root
+    from utils.cluster_loader import get_data_root
     data_root = get_data_root()
     
     dates = set()
@@ -1219,7 +1328,6 @@ async def delete_event(action: DeleteEventRequest, current_user: str = Depends(g
     # Find the date for this visit to increment date-specific count
     event_date = None
     try:
-        from backend.utils.cluster_loader import get_data_root
         branch_proc_path = os.path.join(get_data_root(), "processed", branch_id)
         if os.path.exists(branch_proc_path):
             # Check selected date first for efficiency
@@ -1258,8 +1366,6 @@ async def delete_event(action: DeleteEventRequest, current_user: str = Depends(g
 
     # Persistent mark as deleted in local JSON
     try:
-        from backend.utils.cluster_loader import get_data_root
-        import json
         branch_proc_path = os.path.join(get_data_root(), "processed", branch_id)
         if os.path.exists(branch_proc_path):
             # Check all date folders to find the visit and event
@@ -1324,7 +1430,6 @@ async def deep_delete(action: DeepDeleteRequest, current_user: str = Depends(get
     # Find the date for this customer to increment date-specific count
     customer_date = None
     try:
-        from backend.utils.cluster_loader import get_data_root
         branch_proc_path = os.path.join(get_data_root(), "processed", branch_id)
         if os.path.exists(branch_proc_path):
             # No 'date' in DeepDeleteRequest, so we must scan date folders
@@ -1347,8 +1452,6 @@ async def deep_delete(action: DeepDeleteRequest, current_user: str = Depends(get
 
     # Persistent mark as deleted in local JSON
     try:
-        from backend.utils.cluster_loader import get_data_root
-        import json
         branch_proc_path = os.path.join(get_data_root(), "processed", branch_id)
         if os.path.exists(branch_proc_path):
             for d in os.listdir(branch_proc_path):

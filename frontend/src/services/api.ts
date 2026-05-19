@@ -51,6 +51,16 @@ export const fetchDuplicateClusters = async (branchId: string, date: string) => 
   return response.data;
 };
 
+export const fetchEmployees = async (branchId: string, date: string) => {
+  const response = await api.get('/api/employees', {
+    params: {
+      branchId,
+      date,
+    },
+  });
+  return response.data;
+};
+
 export const fetchAllVisits = async (branchId: string, date: string) => {
   const response = await api.get('/api/visits', {
     params: {
@@ -221,6 +231,26 @@ export const triggerIngest = async (branchId: string, date: string, apiKey?: str
 
 export const checkIngestStatus = async (branchId: string, date: string) => {
   const response = await api.get('/api/ingest/status', { params: { branchId, date } });
+  return response.data;
+};
+
+export const fetchAvailableBranches = async () => {
+  const response = await axios.get(`${BASE_URL}/api/branches`);
+  return response.data;
+};
+
+export const enrollEmployee = async (data: { branchId: string, employeeId: string, name: string, image: string }) => {
+  const response = await axios.post(`${BASE_URL}/api/employees/enroll`, data);
+  return response.data;
+};
+
+export const fetchEnrolledEmployees = async (branchId: string) => {
+  const response = await axios.get(`${BASE_URL}/api/employees/list`, { params: { branchId } });
+  return response.data;
+};
+
+export const deleteEnrolledEmployee = async (branchId: string, employeeId: string) => {
+  const response = await axios.delete(`${BASE_URL}/api/employees/${employeeId}`, { params: { branchId } });
   return response.data;
 };
 

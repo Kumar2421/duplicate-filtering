@@ -6,7 +6,7 @@ from typing import Optional
 
 import httpx
 
-from ..config.settings import settings
+from core.config.settings import settings
 
 
 @dataclass(frozen=True)

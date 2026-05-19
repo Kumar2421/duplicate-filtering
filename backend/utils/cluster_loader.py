@@ -203,3 +203,27 @@ def get_filtered_duplicates(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             filtered.append(c)
             
     return filtered
+
+def load_employees_data(branch_id: str, date: str) -> List[Dict[str, Any]]:
+    """
+    Loads employees from data/processed/{branchId}/{date}/employees.json.
+    """
+    data_root = get_data_root()
+    path = os.path.join(data_root, "processed", branch_id, date, "employees.json")
+    
+    if not os.path.exists(path):
+        return []
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            employees = json.load(f)
+            # Ensure image URLs are correct if they are local paths
+            for emp in employees:
+                if "image" in emp and emp["image"] and not emp["image"].startswith("http") and not emp["image"].startswith("/images/"):
+                    # If it's just a filename or relative path, we might need to fix it
+                    # But if the ingestion stores it as /images/branch/date/visit/file.jpg, it's already good.
+                    pass
+            return employees
+    except Exception as e:
+        logger.error(f"CLUSTER_LOADER: Error loading employees file {path}: {e}")
+        return []

@@ -1,0 +1,13 @@
+train: /home/fusion-gpu/fusion-projects/idcard-deduction/ID_Card_Detection.v1i.yolov8/train/images
+val: /home/fusion-gpu/fusion-projects/idcard-deduction/ID_Card_Detection.v1i.yolov8/valid/images
+test: /home/fusion-gpu/fusion-projects/idcard-deduction/ID_Card_Detection.v1i.yolov8/test/images
+
+nc: 1
+names: ['id_card']
+
+roboflow:
+  workspace: akash-lqx1i
+  project: id_card_detection-ookcx
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/akash-lqx1i/id_card_detection-ookcx/dataset/1

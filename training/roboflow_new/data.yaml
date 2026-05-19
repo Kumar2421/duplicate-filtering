@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['Card']
+
+roboflow:
+  workspace: abhinav-singh-g1wh5
+  project: id-card-detector-ahb2l
+  version: 1
+  license: MIT
+  url: https://universe.roboflow.com/abhinav-singh-g1wh5/id-card-detector-ahb2l/dataset/1

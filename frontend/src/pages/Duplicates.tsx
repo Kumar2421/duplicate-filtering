@@ -28,7 +28,19 @@ const Duplicates: React.FC = () => {
   const [toEmployee, setToEmployee] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [deletingEventKeys, setDeletingEventKeys] = React.useState<Set<string>>(new Set());
-  const [deletedEventKeys, setDeletedEventKeys] = React.useState<Set<string>>(new Set());
+  const [deletedEventKeys, setDeletedEventKeys] = React.useState<Set<string>>(() => {
+    // Load from localStorage on mount
+    const stored = localStorage.getItem('deleted_event_keys');
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        return new Set(parsed);
+      } catch {
+        return new Set();
+      }
+    }
+    return new Set();
+  });
   const [timeFromDraft, setTimeFromDraft] = React.useState<string>('');
   const [timeFrom, setTimeFrom] = React.useState<string>('');
   const [timeTo, setTimeTo] = React.useState<string>('');
@@ -57,6 +69,12 @@ const Duplicates: React.FC = () => {
       }
     }
   }, [availableDatesData, currentBranch, setDateRange]);
+
+  // Clear localStorage when branch or date changes
+  useEffect(() => {
+    localStorage.removeItem('deleted_event_keys');
+    setDeletedEventKeys(new Set());
+  }, [currentBranch, dateRange.startDate]);
 
   const handleIdToggle = (id: string) => {
     setSelectedIds(prev => {
@@ -170,6 +188,8 @@ const Duplicates: React.FC = () => {
         setDeletedEventKeys(prev => {
           const next = new Set(prev);
           next.add(eventKey);
+          // Save to localStorage
+          localStorage.setItem('deleted_event_keys', JSON.stringify(Array.from(next)));
           return next;
         });
         refetch();

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from core.ml.quality_filter import QualityFilter
 
 from insightface.app import FaceAnalysis
 
-from ...utils.gpu_manager import get_device
+from utils.gpu_manager import get_device
 
 
 class ModelManager:

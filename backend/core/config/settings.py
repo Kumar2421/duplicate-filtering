@@ -13,6 +13,7 @@ class Settings:
     SIM_THRESHOLD: float = float(os.getenv("SIM_THRESHOLD", "0.5"))
     PRIMARY_MATCH_THRESHOLD: float = float(os.getenv("PRIMARY_MATCH_THRESHOLD", "0.5"))
     STRICT_MATCH_THRESHOLD: float = float(os.getenv("STRICT_MATCH_THRESHOLD", "0.75"))
+    POSSIBLE_MATCH_THRESHOLD: float = float(os.getenv("POSSIBLE_MATCH_THRESHOLD", "0.65"))
     STORAGE_PATH: str = os.getenv(
         "STORAGE_PATH",
         str(Path(__file__).resolve().parents[3] / "data" / "raw"),

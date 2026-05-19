@@ -36,3 +36,8 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+employee-download
+employee_images
+qdrant_db_v2
+dataset

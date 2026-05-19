@@ -7,11 +7,11 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 from qdrant_client.http import models
 
-from ..db.qdrant_manager import QdrantManager
-from ..clustering.cluster_engine import ClusterEngine
-from ..clustering.classifier import ClusterClassifier
-from ..config.settings import settings
-from backend.utils.cluster_loader import get_data_root
+from core.db.qdrant_manager import QdrantManager
+from core.clustering.cluster_engine import ClusterEngine
+from core.clustering.classifier import ClusterClassifier
+from core.config.settings import settings
+from utils.cluster_loader import get_data_root
 
 class ClusterService:
     def __init__(self, qdrant_manager: QdrantManager):

@@ -1,18 +1,25 @@
+import asyncio
 import uuid
 import time
 import numpy as np
 import logging
+from pathlib import Path
 from typing import Iterable, Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 
-from ..config.settings import settings
-from ..db.qdrant_manager import EmbeddingPoint, make_point_id
-from ..ml.embedding_service import EmbeddingService
-from ..storage.file_manager import FileManager
-from ..storage.json_cluster_writer import JsonClusterWriter
-from ..storage.visit_manifest_manager import VisitManifestManager
-from ..ingestion.visit_normalizer import normalize_visit, NormalizedImage, _coerce_bool
-from ..metrics.processing_metrics import ProcessingMetricsManager
+from core.config.settings import settings
+from core.db.qdrant_manager import EmbeddingPoint, make_point_id
+from core.ml.embedding_service import EmbeddingService
+from core.storage.file_manager import FileManager
+from core.storage.json_cluster_writer import JsonClusterWriter
+from core.storage.visit_manifest_manager import VisitManifestManager
+from core.ingestion.visit_normalizer import normalize_visit, NormalizedImage, _coerce_bool
+from core.metrics.processing_metrics import ProcessingMetricsManager
+from core.services.employee_enrollment_service import EmployeeEnrollmentService
+from services.api_service import APIService
+
+# Import ID workflow internal logic
+from id_card_workflow.service import process_image_internal
 
 @dataclass
 class PipelineMetrics:
@@ -37,12 +44,16 @@ class IngestionPipeline:
         embedding_service: EmbeddingService,
         qdrant_manager: Any,
         file_manager: FileManager,
-        downloader: Any
+        downloader: Any,
+        employee_enrollment_service: Optional[EmployeeEnrollmentService] = None,
+        api_service: Optional[APIService] = None
     ):
         self.embedding_service = embedding_service
         self.qdrant = qdrant_manager
         self.file_manager = file_manager
         self.downloader = downloader
+        self.employee_enrollment_service = employee_enrollment_service
+        self.api_service = api_service
         self.manifest_writer = JsonClusterWriter()
         self.visit_manifest_manager = VisitManifestManager()
         self.metrics_manager = ProcessingMetricsManager()
@@ -50,6 +61,16 @@ class IngestionPipeline:
 
     def _visit_manifest_path(self, branch_id: str, date: str, visit_id: str) -> str:
         return f"{branch_id}/{date}/visits/{visit_id}.json"
+
+    async def _send_to_id_workflow(self, image_path: str):
+        """
+        Processes an image using the internal ID card workflow logic.
+        """
+        try:
+            await process_image_internal(Path(image_path), Path(image_path).name)
+            self.logger.info(f"ID_WORKFLOW: Successfully processed {image_path}")
+        except Exception as e:
+            self.logger.error(f"ID_WORKFLOW: Error processing image in workflow: {e}")
 
     async def _process_single_image(
         self,
@@ -99,12 +120,84 @@ class IngestionPipeline:
                 self.logger.warning(f"Failed to decode image for {img.url}")
                 return None
 
+            # Send to ID Card Workflow if it's a primary image
+            if img.imageType == "primary":
+                try:
+                    import cv2
+                    temp_crop_dir = Path("/home/fusion-gpu/fusion-projects/duplicate-filtering/backend/id_card_workflow/temp_crops")
+                    temp_crop_dir.mkdir(parents=True, exist_ok=True)
+                    temp_name = f"{visit_ctx.get('visitId', 'unknown')}_{img.eventId or 'primary'}.jpg"
+                    temp_path = temp_crop_dir / temp_name
+                    cv2.imwrite(str(temp_path), img_bgr)
+                    
+                    # Use background task to send to ID workflow service
+                    asyncio.create_task(self._send_to_id_workflow(str(temp_path)))
+                except Exception as e:
+                    self.logger.error(f"ID_WORKFLOW: Error saving/sending image: {e}")
+
             result = self.embedding_service.extract_face_features(img_bgr)
             if not result or result.embedding is None:
                 return None
 
             metrics.total_embeddings_extracted += 1
             
+            # Cross-check against employee enrollment list
+            is_employee = visit_ctx.get("isEmployee", False)
+            is_possible_employee = False
+            employee_id_matched = visit_ctx.get("employeeIdMatched")
+            employee_name_matched = visit_ctx.get("employeeNameMatched")
+            match_similarity = visit_ctx.get("matchSimilarity", 0.0)
+
+            if self.employee_enrollment_service and not is_employee:
+                # Use thresholds from settings
+                strict_threshold = settings.STRICT_MATCH_THRESHOLD
+                possible_threshold = settings.POSSIBLE_MATCH_THRESHOLD
+
+                employee_match = self.employee_enrollment_service.identify_employee(
+                    branch_id=str(visit_ctx["branchId"]),
+                    embedding=result.embedding.tolist() if isinstance(result.embedding, np.ndarray) else result.embedding,
+                    threshold=possible_threshold
+                )
+
+                if employee_match:
+                    similarity = employee_match.get("similarity", 0.0)
+                    match_similarity = similarity
+
+                    if similarity >= strict_threshold:
+                        self.logger.info(f"INGESTION: Identified employee {employee_match.get('employeeId')} ({employee_match.get('name')}) with score {similarity:.2f}")
+                        is_employee = True
+                        is_possible_employee = False
+                    else:
+                        self.logger.info(f"INGESTION: Possible employee match {employee_match.get('employeeId')} with score {similarity:.2f}")
+                        is_possible_employee = True
+                        is_employee = False
+
+                    employee_id_matched = employee_match.get("employeeId")
+                    employee_name_matched = employee_match.get("name")
+
+                    # Update visit_ctx so subsequent images in this visit inherit the flag
+                    visit_ctx["isEmployee"] = is_employee
+                    visit_ctx["isPossibleEmployee"] = is_possible_employee
+                    visit_ctx["employeeIdMatched"] = employee_id_matched
+                    visit_ctx["employeeNameMatched"] = employee_name_matched
+                    visit_ctx["matchSimilarity"] = match_similarity
+
+                    # Auto-conform logic: only for strict matches
+                    if is_employee and self.api_service and visit_ctx.get("clusterId"):
+                        try:
+                            self.logger.info(f"INGESTION: Auto-conforming employee visit {visit_ctx['visitId']} in cluster {visit_ctx['clusterId']}")
+                            asyncio.create_task(self.api_service.send_conformation_action(
+                                branch_id=str(visit_ctx["branchId"]),
+                                date=str(visit_ctx["date"]),
+                                action_data={
+                                    "id": visit_ctx["clusterId"],
+                                    "eventId": str(img.eventId) if img.eventId else "primary",
+                                    "approve": True,
+                                    "note": f"conformed employee (score: {similarity:.2f})"
+                                }
+                            ))
+                        except Exception as conform_err:
+                            self.logger.error(f"INGESTION: Failed to auto-conform: {conform_err}")
             # Phase 2: Null handling for time data - extract and normalize
             raw_visit = visit_ctx.get("raw") or {}
             entry_time = raw_visit.get("entryTime")
@@ -130,7 +223,11 @@ class IngestionPipeline:
                 "customerId": str(visit_ctx["customerId"]),
                 "branchId": str(visit_ctx["branchId"]),
                 "date": str(visit_ctx["date"]),
-                "isEmployee": visit_ctx.get("isEmployee", False),
+                "isEmployee": is_employee,
+                "isPossibleEmployee": is_possible_employee,
+                "employeeIdMatched": employee_id_matched,
+                "employeeNameMatched": employee_name_matched,
+                "matchSimilarity": match_similarity,
                 "isDeleted": visit_ctx.get("isDeleted", False),
                 "entryTime": entry_time,
                 "exitTime": exit_time,

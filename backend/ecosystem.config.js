@@ -1,31 +1,33 @@
 module.exports = {
-  apps: [{
-    name: "duplicate",
-    script: "./venv/bin/python",
-    args: "-m uvicorn backend.main:app --host 0.0.0.0 --port 8009",
-    cwd: "/mnt/additional-disk/duplicate-filtering",
-    env: {
-      PYTHONPATH: "/mnt/additional-disk/duplicate-filtering",
-      CUDA_VISIBLE_DEVICES: "0",
-
-      // Option B (branch-wise token fetching) - provide these via shell env or PM2 ecosystem
-      // so they are NOT hardcoded in the repo.
-      // Admin login credentials
-      ADMIN_USERNAME: process.env.ADMIN_USERNAME || "demo@admin.com",
-      ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || "Fusion@12345",
-      ANALYTICS_DEVICE_ID: process.env.ANALYTICS_DEVICE_ID,
-
-      // Optional overrides (defaults are already set in AnalyticsAuthService)
-      ANALYTICS_LOGIN_URL: process.env.ANALYTICS_LOGIN_URL,
-      ANALYTICS_BRANCH_SWITCH_URL: process.env.ANALYTICS_BRANCH_SWITCH_URL,
-      ANALYTICS_ORIGIN: process.env.ANALYTICS_ORIGIN,
-      ANALYTICS_REFERER: process.env.ANALYTICS_REFERER,
-      ANALYTICS_ACCEPT_LANGUAGE: process.env.ANALYTICS_ACCEPT_LANGUAGE,
+  apps: [
+    {
+      name: "duplicate-backend",
+      script: "venv/bin/python3",
+      args: "-m uvicorn main:app --host 0.0.0.0 --port 8009",
+      cwd: "/home/fusion-gpu/fusion-projects/duplicate-filtering/backend",
+      env: {
+        ANALYTICS_EMAIL: "demo@admin.com",
+        ANALYTICS_PASSWORD: "Fusion@12345",
+        ANALYTICS_DEVICE_ID: "32512b94-3371-410e-9201-ee59e578f6a3",
+        ANALYTICS_LOGIN_URL: "https://auth.analytics.thefusionapps.com/api/auth/login",
+        ANALYTICS_BRANCH_SWITCH_URL: "https://live.thefusionapps.com/api/branch/branches/change",
+        ANALYTICS_ORIGIN: "https://analytics.develop.thefusionapps.com",
+        ANALYTICS_REFERER: "https://analytics.develop.thefusionapps.com/",
+        ANALYTICS_ACCEPT_LANGUAGE: "en-US,en;q=0.9,en-IN;q=0.8"
+      },
+      env_file: ".env",
+      autorestart: true,
+      max_memory_restart: '12G'
     },
-    autorestart: true,
-    watch: false,
-    max_memory_restart: '12G'
-  }]
+    {
+      name: "duplicate-frontend",
+      script: "npx",
+      args: "vite --host 0.0.0.0 --port 9002",
+      cwd: "/home/fusion-gpu/fusion-projects/duplicate-filtering/frontend",
+      env: {
+        NODE_ENV: "production"
+      },
+      autorestart: true
+    }
+  ]
 };
-
-// to restart pm2 delete duplicate && pm2 start backend/ecosystem.config.js

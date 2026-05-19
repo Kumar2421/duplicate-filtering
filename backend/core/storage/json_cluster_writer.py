@@ -2,12 +2,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 import time
 import os
  
 
-from ..config.settings import settings
+from core.config.settings import settings
 
 class JsonClusterWriter:
     def __init__(self, storage_root: str | None = None):
@@ -61,6 +61,41 @@ class JsonClusterWriter:
                     pass
             raise
 
+    def save_employees(self, branch_id: str, date: str, employees: List[Dict[str, Any]]) -> str:
+        """
+        Saves the employees.json for a specific branch and date.
+        Path: data/processed/{branchId}/{date}/employees.json
+        """
+        out_dir = Path(self.storage_root) / str(branch_id) / str(date)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.logger.error(f"Failed to create directory {out_dir}: {e}")
+            raise
+        
+        file_path = out_dir / "employees.json"
+        
+        try:
+            # Atomic write
+            tmp_path = out_dir / f".tmp_{int(time.time())}_employees.json"
+            
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(employees, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+                
+            tmp_path.replace(file_path)
+            self.logger.info(f"Successfully saved employees to {file_path}")
+            return str(file_path)
+        except Exception as e:
+            self.logger.error(f"Failed to save employees to {file_path}: {e}")
+            if 'tmp_path' in locals() and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except:
+                    pass
+            raise
+
     def load_visit_clusters(self, branch_id: str, date: str) -> Dict[str, Any] | None:
         """Loads existing clusters for a branch and date."""
         file_path = Path(self.storage_root) / str(branch_id) / str(date) / "visit-clusters.json"
@@ -71,4 +106,16 @@ class JsonClusterWriter:
                 return json.load(f)
         except Exception as e:
             self.logger.error(f"Failed to load clusters: {e}")
+            return None
+
+    def load_employees(self, branch_id: str, date: str) -> List[Dict[str, Any]] | None:
+        """Loads existing employees for a branch and date."""
+        file_path = Path(self.storage_root) / str(branch_id) / str(date) / "employees.json"
+        if not file_path.exists():
+            return None
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.error(f"Failed to load employees: {e}")
             return None

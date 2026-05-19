@@ -1,3 +1,7 @@
+onnxruntime-gpu
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
 fastapi
 uvicorn
 insightface
@@ -7,5 +11,5 @@ opencv-python
 httpx
 pydantic
 numpy
-
+torch
 deepface==0.0.99

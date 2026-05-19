@@ -2,7 +2,7 @@ from insightface.app import FaceAnalysis
 import numpy as np
 import cv2
 import httpx
-from ..utils.gpu_manager import get_device
+from utils.gpu_manager import get_device
 import json
 import logging
 

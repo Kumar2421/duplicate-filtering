@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from datetime import datetime
-
-from ..config.settings import settings
-from ...utils.normalizer import detect_version_from_payload, resolve_image_data
+from utils.normalizer import detect_version_from_payload, resolve_image_data
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -119,21 +116,6 @@ def normalize_visit(visit: Dict[str, Any]) -> Dict[str, Any]:
         is_deleted_val = _get_nested(visit, "rawVisit", "isDeleted")
 
     is_employee = _coerce_bool(is_employee_val)
-
-    # Duration-based employee detection (duration >= 5 hours)
-    entry_time_str = visit.get("entryTime") or _get_nested(visit, "rawVisit", "entryTime")
-    exit_time_str = visit.get("exitTime") or _get_nested(visit, "rawVisit", "exitTime")
-
-    if not is_employee and entry_time_str and exit_time_str:
-        try:
-            # ISO format: 2026-04-26T21:13:22.414Z
-            entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
-            exit_dt = datetime.fromisoformat(exit_time_str.replace('Z', '+00:00'))
-            duration_hours = (exit_dt - entry_dt).total_seconds() / 3600
-            if duration_hours >= 5.0:
-                is_employee = True
-        except Exception:
-            pass
 
     return {
         "visitId": visit.get("id"),

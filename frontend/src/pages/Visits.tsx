@@ -1,11 +1,12 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAppStore } from '../store/useStore';
-import { fetchAllVisits, fetchAvailableDates, BASE_URL } from '../services/api';
+import { fetchAllVisits, fetchAvailableDates, enrollEmployee, deepDelete, BASE_URL } from '../services/api';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
-import { Search, MapPin, RefreshCw, ImageIcon, X, AlertCircle } from 'lucide-react';
+import { Search, MapPin, RefreshCw, ImageIcon, X, AlertCircle, UserPlus, Loader2, ShieldCheck, UserSearch, Trash2, CheckSquare, Square } from 'lucide-react';
 import { DateSelector } from '../components/DateSelector';
+import { toast } from 'sonner';
 
 const Visits: React.FC = () => {
     const { currentBranch, dateRange, setDateRange } = useAppStore();
@@ -14,6 +15,11 @@ const Visits: React.FC = () => {
     const [timeFromDraft, setTimeFromDraft] = useState<string>('');
     const [timeFrom, setTimeFrom] = useState<string>('');
     const [timeTo, setTimeTo] = useState<string>('');
+    
+    const [selectedCustomerIds, setSelectedCustomerIds] = useState<Set<string>>(new Set());
+    const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+    
+    const queryClient = useQueryClient();
 
     const { data: availableDatesData } = useQuery({
         queryKey: ['available-dates', currentBranch],
@@ -24,6 +30,34 @@ const Visits: React.FC = () => {
         queryKey: ['visits', currentBranch, dateRange.startDate],
         queryFn: () => fetchAllVisits(currentBranch, dateRange.startDate),
     });
+
+    const enrollmentMutation = useMutation({
+        mutationFn: enrollEmployee,
+        onSuccess: () => {
+            toast.success('Staff member enrolled successfully');
+            queryClient.invalidateQueries({ queryKey: ['enrolled-employees'] });
+            setSelectedItem(null);
+        },
+        onError: (error: any) => {
+            toast.error(`Enrollment failed: ${error.message}`);
+        }
+    });
+
+    const handleEnrollFromVisit = () => {
+        if (!selectedItem) return;
+        
+        const staffId = `employees-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
+        const name = prompt('Enter Staff Name:', 'New Staff Member');
+        
+        if (!name) return;
+
+        enrollmentMutation.mutate({
+            branchId: currentBranch,
+            employeeId: staffId,
+            name: name,
+            image: selectedItem.currentUrl.startsWith('/') ? `${BASE_URL}${selectedItem.currentUrl}` : selectedItem.currentUrl
+        });
+    };
 
     const flattenedVisits = useMemo(() => {
         if (!data?.visits) return [];
@@ -39,15 +73,12 @@ const Visits: React.FC = () => {
                 const et = v.entryTime;
                 if (!et || typeof et !== 'string') return false;
 
-                // Extract time portion from entryTime (HH:MM format)
                 const entryTimeStr = et.includes('T') ? et.split('T')[1].replace('Z', '') : et;
                 const [entryHour, entryMinute] = entryTimeStr.split(':').map(Number);
 
-                // Convert filter times to numbers for comparison
                 const [fromHour, fromMinute] = timeFrom ? timeFrom.split(':').map(Number) : [0, 0];
                 const [toHour, toMinute] = timeTo ? timeTo.split(':').map(Number) : [23, 59];
 
-                // Convert to minutes since midnight for easy comparison
                 const entryMinutes = entryHour * 60 + entryMinute;
                 const fromMinutes = fromHour * 60 + fromMinute;
                 const toMinutes = toHour * 60 + toMinute;
@@ -67,6 +98,55 @@ const Visits: React.FC = () => {
 
         return visits;
     }, [data, searchQuery, timeFrom, timeTo, dateRange.startDate]);
+
+    const handleToggleSelect = (customerId: string) => {
+        const next = new Set(selectedCustomerIds);
+        if (next.has(customerId)) next.delete(customerId);
+        else next.add(customerId);
+        setSelectedCustomerIds(next);
+    };
+
+    const handleSelectAll = () => {
+        if (selectedCustomerIds.size === flattenedVisits.length) {
+            setSelectedCustomerIds(new Set());
+        } else {
+            setSelectedCustomerIds(new Set(flattenedVisits.map((v: any) => v.customerId)));
+        }
+    };
+
+    const handleBulkDeepDelete = async () => {
+        if (selectedCustomerIds.size === 0) return;
+        
+        if (!window.confirm(`Are you sure you want to deep delete ALL data for ${selectedCustomerIds.size} selected customers? This cannot be undone.`)) {
+            return;
+        }
+
+        setIsBulkDeleting(true);
+        const branchToken = localStorage.getItem(`branch_token_${currentBranch}`);
+        const idsToDelete = Array.from(selectedCustomerIds);
+        
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const customerId of idsToDelete) {
+            try {
+                await deepDelete({
+                    branchId: currentBranch,
+                    customerId: customerId,
+                    api_key: branchToken || undefined
+                });
+                successCount++;
+            } catch (err) {
+                failCount++;
+                console.error(`Failed to delete customer ${customerId}:`, err);
+            }
+        }
+
+        toast.success(`Bulk delete finished. Success: ${successCount}, Failed: ${failCount}`);
+        setSelectedCustomerIds(new Set());
+        setIsBulkDeleting(false);
+        refetch();
+    };
 
     useEffect(() => {
         if (availableDatesData?.dates?.length > 0) {
@@ -105,15 +185,33 @@ const Visits: React.FC = () => {
                         Showing {stats.uniqueVisits} visits for {dateRange.startDate}
                     </p>
                 </div>
-                <Button
-                    variant="secondary"
-                    onClick={() => refetch()}
-                    disabled={isLoading}
-                    className="bg-white border shadow-sm font-black text-xs uppercase tracking-widest px-6 h-11 rounded-xl"
-                >
-                    <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
-                    Refresh Logs
-                </Button>
+                
+                <div className="flex items-center gap-2">
+                    {selectedCustomerIds.size > 0 && (
+                        <Button
+                            variant="destructive"
+                            onClick={handleBulkDeepDelete}
+                            disabled={isBulkDeleting}
+                            className="font-black text-xs uppercase tracking-widest px-6 h-11 rounded-xl shadow-lg shadow-red-100 animate-in fade-in zoom-in duration-200"
+                        >
+                            {isBulkDeleting ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            ) : (
+                                <Trash2 className="w-4 h-4 mr-2" />
+                            )}
+                            Deep Delete ({selectedCustomerIds.size})
+                        </Button>
+                    )}
+                    <Button
+                        variant="secondary"
+                        onClick={() => refetch()}
+                        disabled={isLoading}
+                        className="bg-white border shadow-sm font-black text-xs uppercase tracking-widest px-6 h-11 rounded-xl"
+                    >
+                        <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
+                        Refresh Logs
+                    </Button>
+                </div>
             </div>
 
             {/* Filter Bar */}
@@ -168,27 +266,82 @@ const Visits: React.FC = () => {
                 </div>
             ) : (
                 <div className="space-y-10">
+                    <div className="flex items-center gap-2 px-2">
+                        <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            onClick={handleSelectAll}
+                            className="h-8 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-blue-600 transition-colors"
+                        >
+                            {selectedCustomerIds.size === flattenedVisits.length && flattenedVisits.length > 0 ? (
+                                <CheckSquare className="w-4 h-4 mr-2" />
+                            ) : (
+                                <Square className="w-4 h-4 mr-2" />
+                            )}
+                            Select All Visible ({flattenedVisits.length})
+                        </Button>
+                    </div>
+
                     {flattenedVisits?.map((visit: any, idx: number) => {
                         const images = visit.allImages && visit.allImages.length > 0
                             ? visit.allImages
                             : [{ url: visit.image || visit.imageUrl, name: 'primary.jpg', isPrimary: true }];
 
+                        const isSelected = selectedCustomerIds.has(visit.customerId);
+
                         return (
-                            <div key={visit.visitId || idx} className="space-y-4">
+                            <div key={visit.visitId || idx} className={`space-y-4 p-4 rounded-2xl transition-all border ${isSelected ? 'bg-blue-50/30 border-blue-200' : 'border-transparent hover:bg-white/50'}`}>
                                 {/* Visit Header */}
                                 <div className="flex items-center justify-between border-b border-slate-200 pb-3">
                                     <div className="flex items-center gap-4">
-                                        <div className="flex flex-wrap gap-2">
-                                            <span className="text-[10px] font-black bg-slate-900 text-white px-2 py-0.5 rounded-lg uppercase tracking-tighter">
-                                                {visit.customerId}
+                                        <button 
+                                            onClick={() => handleToggleSelect(visit.customerId)}
+                                            className={`p-1.5 rounded-lg transition-colors ${isSelected ? 'text-blue-600 bg-blue-100' : 'text-slate-300 hover:text-slate-400'}`}
+                                        >
+                                            {isSelected ? <CheckSquare size={18} /> : <Square size={18} />}
+                                        </button>
+                                        <div className="flex items-center gap-4">
+                                            <div className="flex flex-wrap gap-2 items-center">
+                                                <span className="text-[10px] font-black bg-slate-900 text-white px-2 py-0.5 rounded-lg uppercase tracking-tighter">
+                                                    {visit.customerId}
+                                                </span>
+
+                                                {/* Staff Badges */}
+                                                {visit.isEmployee && (
+                                                    <div className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-lg border border-emerald-200">
+                                                        <ShieldCheck size={12} className="fill-emerald-200" />
+                                                        <span className="text-[9px] font-black uppercase tracking-tighter">
+                                                            STAFF: {visit.employeeNameMatched || 'Verified'}
+                                                        </span>
+                                                        {visit.matchSimilarity && (
+                                                            <span className="text-[8px] font-bold opacity-60">
+                                                                ({(visit.matchSimilarity * 100).toFixed(0)}%)
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {visit.isPossibleEmployee && !visit.isEmployee && (
+                                                    <div className="flex items-center gap-1.5 px-2 py-0.5 bg-amber-100 text-amber-700 rounded-lg border border-amber-200">
+                                                        <UserSearch size={12} />
+                                                        <span className="text-[9px] font-black uppercase tracking-tighter">
+                                                            POSSIBLE STAFF: {visit.employeeNameMatched}
+                                                        </span>
+                                                        {visit.matchSimilarity && (
+                                                            <span className="text-[8px] font-bold opacity-60">
+                                                                ({(visit.matchSimilarity * 100).toFixed(0)}%)
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <span className="text-xs font-bold text-slate-400">
+                                                Visit #{visit.visitId}
+                                            </span>
+                                            <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">
+                                                {visit.time}
                                             </span>
                                         </div>
-                                        <span className="text-xs font-bold text-slate-400">
-                                            Visit #{visit.visitId}
-                                        </span>
-                                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">
-                                            {visit.time}
-                                        </span>
                                     </div>
                                 </div>
 
@@ -276,6 +429,22 @@ const Visits: React.FC = () => {
                                             <p className="text-sm font-bold text-slate-900">{selectedItem.visitId}</p>
                                             <p className="text-xs text-slate-500 mt-1">{selectedItem.time} | {selectedItem.branchId}</p>
                                         </div>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Actions</h3>
+                                        <Button 
+                                            onClick={handleEnrollFromVisit}
+                                            disabled={enrollmentMutation.isPending}
+                                            className="w-full h-11 bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-widest text-[10px] rounded-xl shadow-lg shadow-indigo-100"
+                                        >
+                                            {enrollmentMutation.isPending ? (
+                                                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                                            ) : (
+                                                <UserPlus className="w-4 h-4 mr-2" />
+                                            )}
+                                            Enroll as Staff
+                                        </Button>
                                     </div>
 
                                     <div className="space-y-2">

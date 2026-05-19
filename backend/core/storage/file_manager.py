@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +11,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from ..config.settings import settings
+from core.config.settings import settings
 
 
 @dataclass(frozen=True)
@@ -134,3 +135,17 @@ class FileManager:
 
         h, w = img.shape[:2]
         return StoredImage(local_path=str(file_path), sha256=self._sha256(data), width=w, height=h)
+
+    def save_employee_image(self, branch_id: str, employee_id: str, img_bgr: np.ndarray) -> str:
+        """Saves an employee's enrollment image to a branch-specific folder."""
+        # Align with get_data_root() logic from main.py
+        from utils.cluster_loader import get_data_root
+        data_root = Path(get_data_root())
+        target_dir = data_root / "employee_images" / str(branch_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        file_name = f"{employee_id}.jpg"
+        file_path = target_dir / file_name
+        
+        cv2.imwrite(str(file_path), img_bgr)
+        return f"/employee_images/{branch_id}/{file_name}"

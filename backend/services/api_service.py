@@ -6,8 +6,8 @@ import pytz
 import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from backend.utils.normalizer import normalize_visit_data, fetch_and_prepare
-from backend.services.analytics_auth_service import AnalyticsAuthService
+from utils.normalizer import normalize_visit_data, fetch_and_prepare
+from services.analytics_auth_service import AnalyticsAuthService
 
 class APIService:
     def __init__(
@@ -19,10 +19,12 @@ class APIService:
         enabled: bool = True,
         configs: List[Dict[str, Any]] = None,
         auth_service: Optional[AnalyticsAuthService] = None,
+        employee_category: str = "employees",
     ):
         self.base_url = base_url
-        self.limit = 30
+        self.limit = int(limit) if limit else 30
         self.category = category
+        self.employee_category = employee_category
         self.time_range = time_range
         self.enabled = enabled
         self.configs = configs or []
@@ -64,12 +66,13 @@ class APIService:
                 return cfg.get("api_key")
         return None
 
-    def _get_cursor_file(self, branch_id: str, date_str: str) -> str:
-        return os.path.join(self.state_dir, f"cursor_{branch_id}_{date_str}.json")
+    def _get_cursor_file(self, branch_id: str, date_str: str, category: Optional[str] = None) -> str:
+        suffix = f"_{category}" if category else ""
+        return os.path.join(self.state_dir, f"cursor_{branch_id}_{date_str}{suffix}.json")
 
-    def load_last_updated_cursor(self, branch_id: str, date_str: str) -> Optional[str]:
+    def load_last_updated_cursor(self, branch_id: str, date_str: str, category: Optional[str] = None) -> Optional[str]:
         """Load last_updated cursor for incremental polling (UTC ISO8601 string ending with Z)."""
-        cursor_file = self._get_cursor_file(branch_id, date_str)
+        cursor_file = self._get_cursor_file(branch_id, date_str, category)
         if not os.path.exists(cursor_file):
             return None
         try:
@@ -83,9 +86,9 @@ class APIService:
             self.logger.error(f"Error loading cursor file {cursor_file}: {e}")
             return None
 
-    def save_last_updated_cursor(self, branch_id: str, date_str: str, last_updated: str) -> None:
+    def save_last_updated_cursor(self, branch_id: str, date_str: str, last_updated: str, category: Optional[str] = None) -> None:
         """Persist last_updated cursor for incremental polling."""
-        cursor_file = self._get_cursor_file(branch_id, date_str)
+        cursor_file = self._get_cursor_file(branch_id, date_str, category)
         try:
             with open(cursor_file, "w") as f:
                 json.dump({"last_updated": last_updated}, f)
@@ -100,6 +103,8 @@ class APIService:
         time_range: Optional[str] = None,
         retries: int = 3,
         api_key_override: Optional[str] = None,
+        category: Optional[str] = None,
+        exclude_employee: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Phase 4: Enhanced fetch with improved retry logic and error handling.
@@ -113,15 +118,17 @@ class APIService:
             return {}
 
         effective_time_range = time_range if time_range is not None else self.time_range
+        effective_category = category if category is not None else self.category
+        excl = exclude_employee if exclude_employee is not None else True
         params = {
             "branchId": branch_id,
             "date": date,
             "page": page,
             "limit": self.limit,
-            "category": self.category,
+            "category": effective_category,
             "nocache": "true",
             "timeRange": effective_time_range,
-            "excludeEmployee": "true",
+            "excludeEmployee": "true" if excl else "false",
             "excludeSingleEvent": "true",
             "excludeMissedService": "true",
             "isGroup": "true"
@@ -184,12 +191,29 @@ class APIService:
         self.logger.error(f"All {retries} attempts failed for {date} page {page}")
         return {}
 
-    async def fetch_visits_for_date(self, branch_id: str, date: str, time_range: Optional[str] = None, api_key_override: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def fetch_visits_for_date(
+        self,
+        branch_id: str,
+        date: str,
+        time_range: Optional[str] = None,
+        api_key_override: Optional[str] = None,
+        category: Optional[str] = None,
+        exclude_employee: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Loops through all pages for a single date using parallel fetching.
+        Use category / exclude_employee to query employee slice vs primary duplicate feed.
         """
         # Step 1: Fetch first page to get total count or determine if more pages exist
-        first_page = await self.fetch_page(branch_id, date, 0, time_range=time_range, api_key_override=api_key_override)
+        first_page = await self.fetch_page(
+            branch_id,
+            date,
+            0,
+            time_range=time_range,
+            api_key_override=api_key_override,
+            category=category,
+            exclude_employee=exclude_employee,
+        )
         all_visits = first_page.get("visits", [])
         
         if not all_visits or len(all_visits) < self.limit:
@@ -202,7 +226,15 @@ class APIService:
         
         while True:
             tasks = [
-                self.fetch_page(branch_id, date, p, time_range=time_range, api_key_override=api_key_override)
+                self.fetch_page(
+                    branch_id,
+                    date,
+                    p,
+                    time_range=time_range,
+                    api_key_override=api_key_override,
+                    category=category,
+                    exclude_employee=exclude_employee,
+                )
                 for p in range(page, page + chunk_size)
             ]
             
@@ -228,7 +260,7 @@ class APIService:
         self.logger.info(f"Date {date}: Total {len(all_visits)} visits fetched across multiple pages")
         return all_visits
 
-    async def fetch_incremental_pages(self, branch_id: str, date: str, last_updated: Optional[str] = None, api_key_override: Optional[str] = None, deep_sync: bool = False) -> AsyncGenerator[List[Dict[str, Any]], None]:
+    async def fetch_incremental_pages(self, branch_id: str, date: str, last_updated: Optional[str] = None, api_key_override: Optional[str] = None, deep_sync: bool = False, category: Optional[str] = None, exclude_employee: Optional[bool] = None) -> AsyncGenerator[List[Dict[str, Any]], None]:
         """
         Polls the API page by page. 
         Yields a page only if it contains visits newer than last_updated.
@@ -250,7 +282,7 @@ class APIService:
                 last_ts = None
 
         while True:
-            data = await self.fetch_page(branch_id, date, page, api_key_override=api_key_override)
+            data = await self.fetch_page(branch_id, date, page, api_key_override=api_key_override, category=category, exclude_employee=exclude_employee)
             visits = data.get("visits", [])
             if not visits:
                 break

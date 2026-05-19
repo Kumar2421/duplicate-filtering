@@ -1,10 +1,13 @@
 import React, { useMemo } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
-import { LayoutDashboard, Users, UserPlus, Menu, X, ChevronDown, LogOut, Settings, Check, Building2, User } from 'lucide-react';
+import { LayoutDashboard, Users, UserPlus, Menu, X, ChevronDown, LogOut, Settings, Check, Building2, User, ShieldCheck } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import Visits from './pages/Visits';
 import Duplicates from './pages/Duplicates';
 import Employees from './pages/Employees';
+import Employees2 from './pages/Employees2';
+import Enrollment from './pages/Enrollment';
+import IDCardVerification from './pages/IDCardVerification';
 import Login from './pages/Login';
 import { useAppStore } from './store/useStore';
 import { Button } from './components/ui/button';
@@ -92,6 +95,9 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
           <SidebarItem to="/visits" icon={Users} label="Visits" active={pathname === '/visits'} />
           <SidebarItem to="/duplicates" icon={UserPlus} label="Duplicates" active={pathname === '/duplicates'} />
           <SidebarItem to="/employees" icon={Users} label="Employees" active={pathname === '/employees'} />
+          <SidebarItem to="/employees2" icon={ShieldCheck} label="Verified Staff" active={pathname === '/employees2'} />
+          <SidebarItem to="/enrollment" icon={UserPlus} label="Enrollment" active={pathname === '/enrollment'} />
+          <SidebarItem to="/id-verification" icon={Check} label="ID Verification" active={pathname === '/id-verification'} />
         </nav>
 
         <div className="p-4 mt-auto">
@@ -214,6 +220,9 @@ function App() {
                   <Route path="/visits" element={<Visits />} />
                   <Route path="/duplicates" element={<Duplicates />} />
                   <Route path="/employees" element={<Employees />} />
+                  <Route path="/employees2" element={<Employees2 />} />
+                  <Route path="/enrollment" element={<Enrollment />} />
+                  <Route path="/id-verification" element={<IDCardVerification />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Layout>
